@@ -1,0 +1,7 @@
+.env
+data/
+miniapp/node_modules/
+miniapp/dist/
+__pycache__/
+.pytest_cache/
+.venv/

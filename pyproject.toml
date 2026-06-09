@@ -1,0 +1,26 @@
+[project]
+name = "chat-with-allys"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "aiogram>=3.13.1",
+  "apscheduler>=3.10.4",
+  "edge-tts>=7.0.0",
+  "fastapi>=0.115.0",
+  "httpx>=0.27.2",
+  "psycopg[binary]>=3.2.1",
+  "pydantic-settings>=2.5.2",
+  "qdrant-client>=1.11.3",
+  "redis>=5.1.1",
+  "uvicorn[standard]>=0.30.6"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.3",
+  "pytest-asyncio>=0.24.0"
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
