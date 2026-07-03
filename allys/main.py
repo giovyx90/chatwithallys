@@ -61,6 +61,9 @@ dispatcher = build_dispatcher(
         settings.predictions_session_secret,
         settings.owner_ids,
         features,
+        settings.giphy_api_key,
+        settings.tenor_api_key,
+        settings.meme_reddit_fallback,
     )
 )
 scheduler = AsyncIOScheduler(timezone=settings.podcast_timezone)
@@ -85,6 +88,8 @@ async def setup_telegram_commands() -> None:
         BotCommand(command="podcast", description="Stato podcast"),
         BotCommand(command="podcast_now", description="Genera podcast ora"),
         BotCommand(command="predictions", description="Apertura bot Predictions"),
+        BotCommand(command="recap", description="Recap AI della chat"),
+        BotCommand(command="mood", description="Umore del gruppo"),
         BotCommand(command="memoria", description="Gestione memoria"),
     ]
     group_commands = [
@@ -104,6 +109,8 @@ async def setup_telegram_commands() -> None:
         BotCommand(command="podcast_now", description="Genera podcast ora"),
         BotCommand(command="roast_level", description="Configura roast"),
         BotCommand(command="predictions", description="Predictions nel mini gioco"),
+        BotCommand(command="recap", description="Recap AI della chat"),
+        BotCommand(command="mood", description="Umore del gruppo"),
         BotCommand(command="memoria", description="Gestione memoria"),
     ]
     admin_commands = group_commands + [
