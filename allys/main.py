@@ -85,6 +85,8 @@ async def setup_telegram_commands() -> None:
         BotCommand(command="podcast", description="Stato podcast"),
         BotCommand(command="podcast_now", description="Genera podcast ora"),
         BotCommand(command="predictions", description="Apertura bot Predictions"),
+        BotCommand(command="recap", description="Recap AI della chat"),
+        BotCommand(command="mood", description="Umore del gruppo"),
         BotCommand(command="memoria", description="Gestione memoria"),
     ]
     group_commands = [
@@ -104,6 +106,8 @@ async def setup_telegram_commands() -> None:
         BotCommand(command="podcast_now", description="Genera podcast ora"),
         BotCommand(command="roast_level", description="Configura roast"),
         BotCommand(command="predictions", description="Predictions nel mini gioco"),
+        BotCommand(command="recap", description="Recap AI della chat"),
+        BotCommand(command="mood", description="Umore del gruppo"),
         BotCommand(command="memoria", description="Gestione memoria"),
     ]
     admin_commands = group_commands + [

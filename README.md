@@ -23,6 +23,8 @@ messaggi comuni dei gruppi.
 ## Comandi Gruppo
 
 - `/allys` stato e aiuto.
+- `/recap` riassunto AI di cosa si e detto in chat ("cosa mi sono persa").
+- `/mood` umore del gruppo letto dal sentiment dei messaggi recenti.
 - `/borsa` apre la Mini App.
 - `/portfolio` mostra portafoglio.
 - `/buy MEME 2` compra asset con i punti del gruppo.
@@ -40,6 +42,11 @@ messaggi comuni dei gruppi.
 
 Allys non interviene spontaneamente: risponde solo quando un messaggio contiene
 `Allys` o quando qualcuno fa reply a un suo messaggio.
+Quando risponde tiene conto del filo della conversazione (gli ultimi messaggi,
+anonimizzati) e dell'umore del gruppo, e adatta il tono: piu utile e calorosa se
+l'aria e tesa, piu pungente se il gruppo e su di giri. La scelta roast/utile non
+e piu casuale ma dipende dall'intento del messaggio (domande e richieste di aiuto
+ottengono sempre una risposta concreta) e dal `roast_level` del gruppo.
 Le risposte AI sono tenute brevi e gli `@username` vengono sostituiti con `@/`.
 Ogni tanto, se ha senso, puo accompagnare la risposta con GIF/video gia mandati
 nel gruppo o con un link meme controllato.

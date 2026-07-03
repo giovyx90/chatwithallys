@@ -34,6 +34,16 @@ from allys.ollama import OllamaClient
 from allys.place import PlaceService
 from allys.podcast import PodcastService, parse_podcast_config
 from allys.rag import RagMemory
+from allys.brain import (
+    HISTORY_TURNS,
+    build_system_prompt,
+    choose_mode,
+    classify_intent,
+    format_transcript,
+    group_mood,
+    response_budget,
+)
+from allys.sentiment import mood_summary
 
 
 router = Router()
@@ -222,7 +232,8 @@ async def allys_help(message: Message) -> None:
     await message.answer(
         f"Sono Allys. Stato: {quiet or 'attiva'}.\n"
         "Chat intelligente in gruppo/DM: rispondo solo se scrivi Allys o mi scrivi in risposta.\n"
-        "Comandi base: /allys, /allys_status, /borsa, /portfolio, /prezzo, /azioni, /lavora, /daily, /memoria, /roast_level\n"
+        "Seguo il filo del discorso e mi adatto all'umore del gruppo.\n"
+        "Comandi base: /allys, /allys_status, /recap, /mood, /borsa, /portfolio, /prezzo, /azioni, /lavora, /daily, /memoria, /roast_level\n"
         "Comandi giochi: /market (nella Mini App), /arcade, /place, /podcast, /podcast_config, /podcast_now\n"
         "Admin: /allys_off /allys_on /allys_pause 30m, /meme_mode, /azienda_crea, /azienda_approva, /azienda_pausa, /azienda_modifica, /azienda_elimina, /azienda_reset_prezzi"
     )
@@ -873,6 +884,71 @@ async def meme_test(message: Message, bot: Bot) -> None:
     await message.answer("\n".join(lines))
 
 
+@router.message(Command("recap"))
+@router.channel_post(Command("recap"))
+async def recap(message: Message) -> None:
+    await ensure_context(message)
+    recent = [row for row in services.db.recent_messages(message.chat.id, limit=60) if (row.get("text") or "").strip()]
+    if len(recent) < 4:
+        await message.answer("Non c'e ancora abbastanza da riassumere. Scrivete un po' e poi richiamatemi con /recap.")
+        return
+    transcript = format_transcript(recent, limit=50)
+    notice = await message.answer("Sto ripassando la conversazione...")
+    try:
+        summary = await services.ollama.chat(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Sei Allys. Riassumi in italiano cosa si e detto nella chat in massimo 5 punti "
+                        "brevi, vivaci e ironici quando serve. Niente nomi propri o username: usa '@/'. "
+                        "Niente markdown pesante, al massimo dei trattini a inizio riga."
+                    ),
+                },
+                {"role": "user", "content": f"Trascrizione anonimizzata:\n{transcript}\n\nFammi un recap sveglio di cosa mi sono persa."},
+            ],
+            num_predict=340,
+            temperature=0.6,
+        )
+    except Exception:
+        logger.exception("failed to build recap for chat_id=%s", message.chat.id)
+        await notice.edit_text("Non sono riuscita a fare il recap, riprovo tra poco.")
+        return
+    text = sanitize_mentions((summary or "").strip())[:1500] or "Recap non disponibile."
+    await notice.edit_text(text)
+
+
+@router.message(Command("mood"))
+@router.channel_post(Command("mood"))
+async def mood_cmd(message: Message) -> None:
+    await ensure_context(message)
+    recent = services.db.recent_messages(message.chat.id, limit=40)
+    scores = []
+    for row in recent:
+        value = row.get("sentiment")
+        if value is None:
+            continue
+        try:
+            scores.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    summary = mood_summary(scores)
+    if summary["label"] == "silenzio":
+        await message.answer("Silenzio totale: non ho abbastanza messaggi recenti per leggere l'umore.")
+        return
+    face = {
+        "carico e positivo": "🔥",
+        "sereno": "🙂",
+        "neutro": "😐",
+        "un po' giu": "🌧",
+        "teso": "⚡",
+    }.get(str(summary["label"]), "😐")
+    await message.answer(
+        f"Umore del gruppo: {summary['label']} {face}\n"
+        f"Media sentiment {summary['average']} · energia {summary['energy']} (ultimi {len(scores)} messaggi)."
+    )
+
+
 @router.message(F.poll)
 async def poll_comment(message: Message) -> None:
     group = await ensure_context(message)
@@ -959,51 +1035,45 @@ async def should_reply(message: Message, bot: Bot, group: dict[str, Any]) -> boo
 
 
 async def build_reply(message: Message, group: dict[str, Any]) -> str:
-    text = message.text or ""
-    docs = await services.rag.search(message.chat.id, text)
-    serious_minigame = is_minigame_query(text)
+    text = message.text or message.caption or ""
+    chat_id = message.chat.id
     roast_level = group.get("roast_level", "medium")
-    mode_by_level = {
-        "soft": 0.80,
-        "medium": 0.55,
-        "chaos": 0.30,
-    }.get(roast_level, 0.55)
+
+    # Contesto vivo: gli ultimi messaggi (il corrente e gia salvato ed e l'ultimo).
+    recent = services.db.recent_messages(chat_id, limit=HISTORY_TURNS + 2)
+    history = recent[:-1] if recent else []
+    mood = group_mood(recent)
+    mood_label = str(mood.get("label", "neutro"))
+
+    intent = classify_intent(text)
+    serious_minigame = is_minigame_query(text) or intent == "minigame"
     if serious_minigame:
-        mode = "helpful"
-    else:
-        mode = "helpful" if random.random() < mode_by_level else "roast"
-    roast_level = group["roast_level"]
-    context = "\n".join(f"- {sanitize_mentions(doc.get('text') or '')}" for doc in docs[:3])
-    base_system = (
-        "Sei Allys, bot di chat per Telegram. Rispondi in italiano, con tono breve e utile. "
-        "Non fare doxxing, odio protetto, minacce o attacchi gravi. "
-        "Non menzionare persone, username o nomi propri del gruppo. "
-        "Se ti riferisci a qualcuno usa solo '@/'. Non usare @username.\n"
-        f"Stai rispondendo in modalità {mode}. Roast level: {roast_level}."
-    )
-    if serious_minigame:
-        context_lines = [build_minigame_context(message), ""]
-        if "borsa" in text.lower() or "azioni" in text.lower() or "market" in text.lower():
-            context_lines.append(
-                "Mantieni tono serio e pratico nelle risposte su economia e borsa."
-            )
-        system = f"{base_system}\nQuando l'utente parla di minigiochi, usa il contesto seguente:\n" + "\n".join(context_lines)
-    else:
-        system = base_system
+        intent = "minigame"
+    mode = choose_mode(intent, roast_level, mood_label)
+
+    docs = await services.rag.search(chat_id, text)
+    memory = "\n".join(f"- {sanitize_mentions(doc.get('text') or '')}" for doc in docs[:3])
+    minigame_ctx = build_minigame_context(message) if serious_minigame else ""
+    system = build_system_prompt(mode, roast_level, mood_label, minigame_ctx)
+
+    transcript = format_transcript(history, limit=HISTORY_TURNS)
+    user_parts: list[str] = []
+    if memory:
+        user_parts.append(f"Cose che ricordi di questo gruppo:\n{memory}")
+    if transcript:
+        user_parts.append(f"Come si sta svolgendo la conversazione (anonimizzata):\n{transcript}")
+    user_parts.append(f"Rispondi a quest'ultimo messaggio, restando nel filo del discorso:\n{sanitize_mentions(text)}")
+
     reply = await services.ollama.chat(
         [
             {"role": "system", "content": system},
-            {
-                "role": "user",
-                "content": (
-                    f"Memoria rilevante:\n{context}\n\n"
-                    f"{build_minigame_context(message) if serious_minigame else ''}\n\n"
-                    f"Messaggio:\n{sanitize_mentions(text)}"
-                ),
-            },
-        ]
+            {"role": "user", "content": "\n\n".join(user_parts)},
+        ],
+        num_predict=response_budget(intent),
+        temperature=0.68 if mode == "helpful" else 0.88,
     )
-    return shorten_reply(sanitize_mentions(reply))
+    max_chars = 420 if intent in {"help", "question", "minigame"} else 300
+    return shorten_reply(sanitize_mentions(reply), max_chars=max_chars)
 
 
 def is_minigame_query(text: str) -> bool:

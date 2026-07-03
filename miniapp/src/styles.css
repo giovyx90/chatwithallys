@@ -1,8 +1,31 @@
 :root {
   color-scheme: dark;
   font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: #101314;
-  color: #f5f1e8;
+
+  /* Design tokens ------------------------------------------------------ */
+  --bg: #0b0e13;
+  --bg-glow-1: rgba(139, 92, 246, 0.22);
+  --bg-glow-2: rgba(16, 185, 129, 0.14);
+  --surface: rgba(255, 255, 255, 0.045);
+  --surface-2: rgba(255, 255, 255, 0.07);
+  --surface-strong: rgba(17, 22, 31, 0.72);
+  --border: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.18);
+  --text: #eef2f6;
+  --muted: #9aa8bd;
+  --accent: #a78bfa;
+  --accent-strong: #8b5cf6;
+  --accent-soft: rgba(139, 92, 246, 0.16);
+  --up: #34d399;
+  --down: #fb7185;
+  --gold: #fbbf24;
+  --radius: 16px;
+  --radius-sm: 11px;
+  --shadow: 0 18px 40px rgba(0, 0, 0, 0.4);
+  --ring: 0 0 0 1px rgba(167, 139, 250, 0.4), 0 0 0 4px rgba(139, 92, 246, 0.14);
+
+  background: var(--bg);
+  color: var(--text);
 }
 
 * {
@@ -22,20 +45,39 @@ body,
 }
 
 button {
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
   color: inherit;
-  min-height: 42px;
+  min-height: 44px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.12s ease, background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+button:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: var(--border-strong);
+}
+
+button:active {
+  transform: translateY(1px) scale(0.99);
+}
+
+button:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
 }
 
 .arcade-app,
 .market-app {
   min-height: 100vh;
-  padding: 18px;
+  padding: 20px 18px calc(28px + env(safe-area-inset-bottom));
   background:
-    linear-gradient(160deg, rgba(137, 50, 184, 0.24) 0%, transparent 38%),
-    linear-gradient(160deg, #101314 0%, #182021 55%, #17101f 100%);
+    radial-gradient(1100px 520px at 12% -8%, var(--bg-glow-1) 0%, transparent 60%),
+    radial-gradient(900px 480px at 108% 4%, var(--bg-glow-2) 0%, transparent 55%),
+    linear-gradient(180deg, #0b0e13 0%, #0c1017 60%, #0d0b16 100%);
 }
 
 .arcade-header,
@@ -43,13 +85,14 @@ button {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 14px;
+  padding: 4px 2px 2px;
 }
 
 .arcade-app p,
 .market-app p {
   margin: 0 0 4px;
-  color: #93bcae;
+  color: var(--muted);
   font-size: 13px;
 }
 
@@ -58,37 +101,81 @@ button {
 .market-app h1,
 .market-app h2 {
   margin: 0;
-  letter-spacing: 0;
+  letter-spacing: -0.01em;
 }
 
 .arcade-app h1,
 .market-app h1 {
-  font-size: 28px;
+  font-size: 27px;
+  font-weight: 800;
+  background: linear-gradient(120deg, #f5f3ff 0%, var(--accent) 90%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
 }
 
 .arcade-header > strong {
   margin-left: auto;
-  padding: 8px 10px;
-  border: 1px solid rgba(216, 180, 254, 0.22);
-  border-radius: 8px;
-  background: rgba(137, 50, 184, 0.2);
-  color: #f4e7ff;
+  padding: 9px 13px;
+  border: 1px solid rgba(167, 139, 250, 0.32);
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.28), rgba(139, 92, 246, 0.12));
+  color: #f4efff;
+  font-weight: 700;
   white-space: nowrap;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+
+.arcade-header button:not(.active),
+.market-app header button {
+  width: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
 }
 
 .arcade-tabs {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 8px;
+  gap: 7px;
   margin: 18px 0;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  backdrop-filter: blur(10px);
+}
+
+.arcade-tabs button {
+  min-width: 0;
+  min-height: 40px;
+  padding: 0 8px;
+  font-size: 12.5px;
+  border: 1px solid transparent;
+  background: transparent;
+}
+
+.arcade-tabs button:hover {
+  background: var(--surface-2);
+}
+
+.arcade-tabs button.active {
+  border-color: rgba(167, 139, 250, 0.5);
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.34), rgba(139, 92, 246, 0.16));
+  color: #f6f2ff;
+  box-shadow: 0 6px 16px rgba(139, 92, 246, 0.24);
 }
 
 .group-selector {
   display: grid;
   gap: 10px;
   margin: 12px 0 16px;
+  padding: 12px 14px;
   font-size: 13px;
-  color: #c8d8d0;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
 }
 
 .group-picker {
@@ -98,48 +185,59 @@ button {
 }
 
 .group-picker button.active {
-  border-color: #8fbcff;
-  background: rgba(143, 188, 255, 0.18);
-}
-
-.arcade-tabs button {
-  min-width: 0;
-  min-height: 38px;
-  padding: 0 8px;
-  font-size: 12px;
-}
-
-.arcade-tabs button.active {
-  border-color: #c084fc;
-  background: rgba(192, 132, 252, 0.2);
+  border-color: rgba(167, 139, 250, 0.5);
+  background: var(--accent-soft);
+  color: #f4efff;
 }
 
 .arcade-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: 12px;
 }
 
 .arcade-grid button,
 .market-card,
 .position-row,
 .leaderboard {
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 8px;
-  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  backdrop-filter: blur(8px);
 }
 
 .arcade-grid button {
+  position: relative;
   display: grid;
   gap: 6px;
-  min-height: 92px;
-  padding: 14px;
+  align-content: start;
+  min-height: 96px;
+  padding: 16px;
   text-align: left;
+  overflow: hidden;
+}
+
+.arcade-grid button::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(120px 80px at 100% 0%, var(--accent-soft), transparent 70%);
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+
+.arcade-grid button:hover::before {
+  opacity: 1;
+}
+
+.arcade-grid button strong {
+  font-size: 15px;
+  font-weight: 700;
 }
 
 .arcade-grid span,
 .position-row span {
-  color: #b9d4ca;
+  color: var(--muted);
   font-size: 13px;
 }
 
@@ -151,7 +249,18 @@ button {
 .market-card {
   display: grid;
   gap: 10px;
-  padding: 14px;
+  padding: 16px;
+}
+
+.market-card h2 {
+  font-size: 17px;
+}
+
+.market-card > p:first-child {
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 
 .market-odds,
@@ -165,33 +274,59 @@ button {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.market-odds button {
+  font-weight: 700;
+}
+
+.market-odds button:first-child {
+  border-color: rgba(52, 211, 153, 0.4);
+  background: rgba(52, 211, 153, 0.12);
+  color: #bbf7e0;
+}
+
+.market-odds button:last-child {
+  border-color: rgba(251, 113, 133, 0.4);
+  background: rgba(251, 113, 133, 0.12);
+  color: #ffd4dc;
+}
+
 .position-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 8px;
-  padding: 10px;
+  padding: 12px 14px;
 }
 
 .leaderboard {
   display: grid;
   gap: 8px;
-  padding: 14px;
+  padding: 16px;
+}
+
+.leaderboard h2 {
+  font-size: 16px;
+  margin-top: 4px;
 }
 
 .leaderboard p {
   margin: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 14px;
 }
 
-.market-app header button {
-  width: 44px;
+.leaderboard p strong {
+  color: var(--gold);
+  margin-right: 6px;
 }
 
 .ticker,
 .stock-dashboard {
   display: grid;
-  gap: 10px;
-  margin: 22px 0;
+  gap: 12px;
+  margin: 20px 0;
 }
 
 .ticker {
@@ -208,15 +343,16 @@ button {
 .quote-box,
 .holdings,
 .admin-assets {
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 8px;
-  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  backdrop-filter: blur(8px);
 }
 
 .stock-list {
   display: grid;
   gap: 6px;
-  padding: 10px;
+  padding: 12px;
 }
 
 .stock-list-head,
@@ -227,12 +363,18 @@ button {
   gap: 8px;
 }
 
+.stock-list-head button {
+  width: 38px;
+  min-height: 38px;
+}
+
 .stock-list button,
 .ticker button {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px;
+  padding: 13px 14px;
+  border-radius: 12px;
 }
 
 .stock-list button {
@@ -240,66 +382,88 @@ button {
   gap: 10px;
 }
 
+.stock-list strong {
+  font-weight: 700;
+}
+
 .stock-list small {
   display: block;
-  color: #b9d4ca;
+  color: var(--muted);
   font-size: 12px;
 }
 
 .stock-list button.active,
 .ticker button.active {
-  border-color: #6ebfa4;
-  background: rgba(110, 191, 164, 0.18);
+  border-color: rgba(52, 211, 153, 0.45);
+  background: linear-gradient(135deg, rgba(52, 211, 153, 0.2), rgba(52, 211, 153, 0.08));
 }
 
 .stock-list span,
 .ticker span {
-  color: #f0d38a;
+  color: var(--gold);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 
 .stock-detail {
   display: grid;
   gap: 14px;
-  padding: 14px;
+  padding: 16px;
 }
 
 .panel-title {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 16px;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.panel-title svg {
+  color: var(--accent);
+}
+
+.panel-title h2 {
+  font-size: 19px;
 }
 
 .quote-strip {
-  padding: 10px;
-  border-radius: 8px;
-  background: rgba(110, 191, 164, 0.12);
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(52, 211, 153, 0.14), rgba(255, 255, 255, 0.02));
+  border: 1px solid rgba(52, 211, 153, 0.16);
 }
 
 .quote-strip strong {
-  font-size: 22px;
+  font-size: 24px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.quote-strip span {
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .finance-chart {
   height: 310px;
-  color: #6ebfa4;
-  padding: 10px;
+  color: var(--up);
+  padding: 12px;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(0, 0, 0, 0.12)),
-    rgba(0, 0, 0, 0.22);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(0, 0, 0, 0.12)),
+    rgba(0, 0, 0, 0.24);
+  border: 1px solid var(--border);
+  border-radius: 14px;
   overflow: hidden;
 }
 
 .finance-chart.down {
-  color: #f38ba8;
+  color: var(--down);
 }
 
 .finance-chart.empty {
   display: grid;
   place-items: center;
-  color: #b9d4ca;
+  color: var(--muted);
 }
 
 .finance-chart svg {
@@ -309,13 +473,13 @@ button {
 }
 
 .grid-line {
-  stroke: rgba(255, 255, 255, 0.08);
+  stroke: rgba(255, 255, 255, 0.07);
   stroke-width: 1;
 }
 
 .axis-label,
 .time-label {
-  fill: #8fb2a7;
+  fill: var(--muted);
   font-size: 12px;
 }
 
@@ -330,29 +494,29 @@ button {
 .line-path {
   fill: none;
   stroke: currentColor;
-  stroke-width: 4;
+  stroke-width: 3.5;
   stroke-linecap: round;
   stroke-linejoin: round;
-  filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.24));
+  filter: drop-shadow(0 8px 18px rgba(0, 0, 0, 0.3));
 }
 
 .scatter-point {
-  fill: #101314;
+  fill: var(--bg);
   stroke: currentColor;
   stroke-width: 3;
 }
 
 .scatter-point.risky {
-  stroke: #f0d38a;
+  stroke: var(--gold);
 }
 
 .signal-panel {
   display: grid;
   gap: 12px;
-  padding: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.045);
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
 }
 
 .panel-title.compact {
@@ -360,7 +524,7 @@ button {
 }
 
 .panel-title.compact h2 {
-  font-size: 18px;
+  font-size: 17px;
 }
 
 .signal-grid {
@@ -371,42 +535,53 @@ button {
 
 .signal-grid span {
   display: grid;
-  gap: 3px;
-  padding: 10px;
-  border-radius: 8px;
-  background: rgba(0, 0, 0, 0.18);
+  gap: 4px;
+  padding: 12px 10px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid var(--border);
 }
 
 .signal-grid strong {
-  color: #f4e7ff;
+  color: #f4efff;
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
 }
 
 .signal-grid small,
 .market-rule {
-  color: #b9d4ca;
+  color: var(--muted);
   font-size: 12px;
 }
 
 .market-rule {
   margin: 0;
+  line-height: 1.45;
 }
 
 .trade {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 8px;
-  margin-top: 16px;
+  margin-top: 14px;
 }
 
 .trade input {
-  min-height: 42px;
+  min-height: 44px;
   min-width: 0;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 8px;
-  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.26);
   color: inherit;
-  padding: 0 12px;
+  padding: 0 13px;
   font: inherit;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.trade input:focus {
+  outline: none;
+  border-color: rgba(167, 139, 250, 0.5);
+  box-shadow: var(--ring);
 }
 
 .trade button {
@@ -424,8 +599,13 @@ button {
 }
 
 .status {
-  margin-top: 12px;
-  color: #f0d38a;
+  margin-top: 14px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(251, 191, 36, 0.22);
+  background: rgba(251, 191, 36, 0.08);
+  color: #fde9b0;
+  font-size: 14px;
 }
 
 .quote-box,
@@ -433,7 +613,12 @@ button {
 .admin-assets {
   display: grid;
   gap: 8px;
-  padding: 12px;
+  padding: 14px;
+}
+
+.holdings h2,
+.admin-assets h2 {
+  font-size: 16px;
 }
 
 .quote-box {
@@ -448,8 +633,8 @@ button {
   position: fixed;
   inset: 0;
   background:
-    linear-gradient(180deg, rgba(18, 9, 31, 0.86), rgba(18, 9, 31, 0.32)),
-    #12091f;
+    linear-gradient(180deg, rgba(13, 11, 22, 0.86), rgba(13, 11, 22, 0.32)),
+    #0d0b16;
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
@@ -475,11 +660,11 @@ button {
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  border: 1px solid rgba(216, 180, 254, 0.22);
-  border-radius: 8px;
-  background: rgba(21, 10, 35, 0.86);
-  backdrop-filter: blur(12px);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: var(--surface-strong);
+  backdrop-filter: blur(14px);
+  box-shadow: var(--shadow);
 }
 
 .place-topbar strong {
@@ -487,17 +672,18 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: #f4e7ff;
+  color: #f4efff;
 }
 
 .place-topbar span {
   min-width: 58px;
   padding: 5px 8px;
-  border-radius: 6px;
-  background: rgba(167, 139, 250, 0.16);
-  color: #dec9ff;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: #e2d6ff;
   text-align: center;
   font-size: 12px;
+  font-weight: 600;
   white-space: nowrap;
 }
 
@@ -509,12 +695,12 @@ button {
   display: grid;
   grid-template-columns: repeat(16, 30px);
   gap: 7px;
-  padding: 10px;
-  border: 1px solid rgba(216, 180, 254, 0.22);
-  border-radius: 8px;
-  background: rgba(21, 10, 35, 0.88);
-  backdrop-filter: blur(12px);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.32);
+  padding: 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  background: var(--surface-strong);
+  backdrop-filter: blur(14px);
+  box-shadow: var(--shadow);
 }
 
 .place-palette button {
@@ -522,13 +708,14 @@ button {
   height: 30px;
   min-height: 30px;
   padding: 0;
-  border-radius: 6px;
+  border-radius: 8px;
   border: 2px solid rgba(255, 255, 255, 0.2);
 }
 
 .place-palette button.selected {
   border-color: #ffffff;
-  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.72);
+  transform: scale(1.08);
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.72);
 }
 
 .place-notice {
@@ -537,10 +724,11 @@ button {
   bottom: max(80px, calc(env(safe-area-inset-bottom) + 80px));
   max-width: min(440px, calc(100vw - 24px));
   min-height: 34px;
-  padding: 8px 10px;
-  border: 1px solid rgba(216, 180, 254, 0.18);
-  border-radius: 8px;
-  background: rgba(21, 10, 35, 0.84);
+  padding: 9px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--surface-strong);
+  backdrop-filter: blur(12px);
   color: #eadcff;
   font-size: 13px;
   line-height: 1.35;
@@ -551,14 +739,14 @@ button {
   z-index: 4;
   max-width: 180px;
   padding: 6px 8px;
-  border: 1px solid rgba(244, 231, 255, 0.28);
-  border-radius: 7px;
-  background: rgba(31, 13, 51, 0.92);
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: rgba(24, 18, 40, 0.94);
   color: #ffffff;
   font-size: 12px;
   line-height: 1.25;
   pointer-events: none;
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
+  box-shadow: var(--shadow);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -573,7 +761,7 @@ button {
   }
 
   .arcade-tabs {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .signal-grid {
