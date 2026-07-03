@@ -81,3 +81,17 @@ def test_system_prompt_mentions_mode_and_guardrails() -> None:
 
 def test_response_budget() -> None:
     assert response_budget("help") >= response_budget("greeting")
+
+
+def test_bot_messages_labeled_as_allys() -> None:
+    messages = [
+        {"username": "mario", "text": "ciao allys"},
+        {"username": "Allys", "text": "ehila, come va?"},
+        {"username": "mario", "text": "tutto bene"},
+    ]
+    aliases = speaker_aliases(messages)
+    transcript = format_transcript(messages, aliases)
+    assert "Allys: ehila" in transcript
+    # Mario resta un utente anonimo e stabile
+    assert transcript.count("utente A") == 2
+    assert "Allys" not in aliases.get("u:mario", "")

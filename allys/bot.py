@@ -14,7 +14,7 @@ from typing import Any
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.types import FSInputFile, Message, Poll, WebAppInfo
+from aiogram.types import FSInputFile, Message, Poll, ReactionTypeEmoji, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from allys.db import Database
@@ -22,11 +22,8 @@ from allys.market import MarketService
 from allys.memes import (
     MEME_MODE_PROBABILITY,
     desired_media_types,
-    is_unviewable_media_error,
     media_debug_line,
     meme_caption,
-    pick_meme_link,
-    remember_unviewable_media,
     should_attach_meme,
     tags_for_media,
 )
@@ -35,6 +32,7 @@ from allys.place import PlaceService
 from allys.podcast import PodcastService, parse_podcast_config
 from allys.rag import RagMemory
 from allys.brain import (
+    BOT_AUTHOR,
     HISTORY_TURNS,
     build_system_prompt,
     choose_mode,
@@ -43,6 +41,7 @@ from allys.brain import (
     group_mood,
     response_budget,
 )
+from allys.media import fetch_working_meme
 from allys.sentiment import mood_summary
 
 
@@ -66,9 +65,24 @@ class Services:
     predictions_session_secret: str
     owner_ids: set[int]
     features: dict[str, bool]
+    giphy_api_key: str
+    tenor_api_key: str
+    meme_reddit_fallback: bool
 
 
 services = Services()
+
+# Stato in-memory per le risposte proattive: quando Allys ha parlato l'ultima
+# volta in una chat e quando ha fatto l'ultima risposta proattiva (anti-spam).
+_LAST_ALLYS_REPLY_AT: dict[int, float] = {}
+_LAST_PROACTIVE_AT: dict[int, float] = {}
+_PROACTIVE_WINDOW_SECONDS = 150
+_PROACTIVE_COOLDOWN_SECONDS = 90
+
+# Emoji di reazione mappate all'umore del messaggio (solo emoji ammesse da Telegram).
+_POSITIVE_REACTIONS = ["🔥", "👍", "🥰", "😁", "🎉", "🤩", "👏", "💯"]
+_NEGATIVE_REACTIONS = ["😭", "😢", "🤨", "🤡", "😱", "👀"]
+_NEUTRAL_REACTIONS = ["🤔", "👀", "🗿", "😐"]
 
 
 def setup_router(
@@ -84,6 +98,9 @@ def setup_router(
     predictions_session_secret: str = "",
     owner_ids: set[int] | None = None,
     features: dict[str, bool] | None = None,
+    giphy_api_key: str = "",
+    tenor_api_key: str = "",
+    meme_reddit_fallback: bool = True,
 ) -> Router:
     services.db = db
     services.rag = rag
@@ -97,6 +114,9 @@ def setup_router(
     services.predictions_session_secret = predictions_session_secret
     services.owner_ids = owner_ids or set()
     services.features = features or {}
+    services.giphy_api_key = giphy_api_key
+    services.tenor_api_key = tenor_api_key
+    services.meme_reddit_fallback = meme_reddit_fallback
     return router
 
 
@@ -874,13 +894,24 @@ async def meme_test(message: Message, bot: Bot) -> None:
         await message.answer("Uso: /meme_test testo da cercare")
         return
     rows = services.db.search_chat_media(message.chat.id, query, limit=5)
-    link = pick_meme_link(query)
-    lines = ["Risultati meme:"]
+    lines = ["Risultati meme (media del gruppo):"]
     lines.extend(media_debug_line(row) for row in rows)
-    if link:
-        lines.append(f"Link fallback suggerito: {link.title}")
-    if len(lines) == 1:
-        lines.append("Nessun match.")
+    if not rows:
+        lines.append("Nessun media del gruppo per questa query.")
+    remote = None
+    try:
+        remote = await fetch_working_meme(
+            query,
+            giphy_api_key=getattr(services, "giphy_api_key", ""),
+            tenor_api_key=getattr(services, "tenor_api_key", ""),
+            reddit_fallback=getattr(services, "meme_reddit_fallback", True),
+        )
+    except Exception:
+        remote = None
+    if remote:
+        lines.append(f"Fallback online (validato, {remote.media_type}): {remote.url}")
+    else:
+        lines.append("Fallback online: nessun media valido trovato adesso.")
     await message.answer("\n".join(lines))
 
 
@@ -990,13 +1021,23 @@ async def group_text(message: Message, bot: Bot) -> None:
     row_id = services.db.add_message(message.chat.id, message.from_user.id, message.from_user.username, text, sentiment)
     if should_remember(text):
         await services.rag.remember(message.chat.id, row_id, text, {"username": message.from_user.username})
+    replied = False
     if not is_quiet(group) and await should_reply(message, bot, group):
         try:
             reply = await build_reply(message, group)
             await send_allys_reply(message, group, reply)
+            replied = True
         except Exception:
             logger.exception("failed to build AI reply for chat_id=%s", message.chat.id)
             await message.answer(_local_brain_error_text())
+    if not replied:
+        await maybe_react(message, bot, group, sentiment)
+    if message.from_user:
+        try:
+            if services.db.member_profile_due(message.chat.id, message.from_user.id):
+                asyncio.create_task(maybe_update_member_profile(message.chat.id, message.from_user.id))
+        except Exception:
+            logger.info("member profile due-check failed for chat_id=%s", message.chat.id)
 
 
 @router.channel_post(F.text)
@@ -1031,6 +1072,16 @@ async def should_reply(message: Message, bot: Bot, group: dict[str, Any]) -> boo
             return True
     if message.text and "allys" in message.text.lower():
         return True
+    # Risposta proattiva: se Allys ha parlato da poco in questa chat e arriva un
+    # follow-up (una domanda), interviene anche senza essere chiamata per nome,
+    # con una finestra temporale e un cooldown anti-spam.
+    now = time.time()
+    last_allys = _LAST_ALLYS_REPLY_AT.get(message.chat.id, 0.0)
+    last_proactive = _LAST_PROACTIVE_AT.get(message.chat.id, 0.0)
+    if (now - last_allys) <= _PROACTIVE_WINDOW_SECONDS and (now - last_proactive) >= _PROACTIVE_COOLDOWN_SECONDS:
+        if _looks_like_followup(message.text or ""):
+            _LAST_PROACTIVE_AT[message.chat.id] = now
+            return True
     return False
 
 
@@ -1056,10 +1107,19 @@ async def build_reply(message: Message, group: dict[str, Any]) -> str:
     minigame_ctx = build_minigame_context(message) if serious_minigame else ""
     system = build_system_prompt(mode, roast_level, mood_label, minigame_ctx)
 
+    profile = ""
+    if message.from_user:
+        try:
+            profile = services.db.get_member_profile(chat_id, message.from_user.id)
+        except Exception:
+            profile = ""
+
     transcript = format_transcript(history, limit=HISTORY_TURNS)
     user_parts: list[str] = []
     if memory:
         user_parts.append(f"Cose che ricordi di questo gruppo:\n{memory}")
+    if profile:
+        user_parts.append(f"Cosa sai di chi ti scrive (uso interno, non citare nomi ne dati personali):\n{profile}")
     if transcript:
         user_parts.append(f"Come si sta svolgendo la conversazione (anonimizzata):\n{transcript}")
     user_parts.append(f"Rispondi a quest'ultimo messaggio, restando nel filo del discorso:\n{sanitize_mentions(text)}")
@@ -1129,6 +1189,26 @@ def build_minigame_context(message: Message) -> str:
 
 
 async def send_allys_reply(message: Message, group: dict[str, Any], reply: str) -> None:
+    try:
+        await _deliver_allys_reply(message, group, reply)
+    finally:
+        _remember_allys_message(message.chat.id, reply)
+
+
+def _remember_allys_message(chat_id: int, reply: str) -> None:
+    """Salva la risposta di Allys tra i messaggi, cosi la cronologia e un vero
+    botta-e-risposta e le repliche successive tengono conto di cosa ha detto."""
+    text = (reply or "").strip()
+    if not text:
+        return
+    try:
+        services.db.add_message(chat_id, None, BOT_AUTHOR, text, 0)
+        _LAST_ALLYS_REPLY_AT[chat_id] = time.time()
+    except Exception:
+        logger.info("could not persist Allys reply for chat_id=%s", chat_id)
+
+
+async def _deliver_allys_reply(message: Message, group: dict[str, Any], reply: str) -> None:
     prompt = message.text or message.caption or ""
     if not should_attach_meme(group.get("meme_mode") or "medium", prompt, reply):
         await message.answer(reply)
@@ -1155,23 +1235,102 @@ async def send_allys_reply(message: Message, group: dict[str, Any], reply: str) 
             services.db.disable_chat_media(int(row["id"]))
         except Exception:
             logger.exception("failed to send meme media id=%s chat_id=%s", row["id"], message.chat.id)
-    link = pick_meme_link(query)
-    if link:
+
+    # Fallback su sorgente reale (Giphy/Tenor/Reddit) con URL VALIDATO: se nulla
+    # e utilizzabile ripieghiamo sul testo, senza mai mandare un media rotto.
+    remote = None
+    try:
+        remote = await fetch_working_meme(
+            query,
+            giphy_api_key=getattr(services, "giphy_api_key", ""),
+            tenor_api_key=getattr(services, "tenor_api_key", ""),
+            reddit_fallback=getattr(services, "meme_reddit_fallback", True),
+        )
+    except Exception:
+        logger.info("working meme fetch failed for chat_id=%s", message.chat.id)
+    if remote:
+        caption = meme_caption(reply)
         try:
-            if link.media_type == "video":
-                await message.answer_video(link.image_url, caption=meme_caption(reply, link=link))
+            if remote.media_type == "gif":
+                await message.answer_animation(remote.url, caption=caption)
+            elif remote.media_type == "video":
+                await message.answer_video(remote.url, caption=caption)
             else:
-                await message.answer_photo(link.image_url, caption=meme_caption(reply, link=link))
+                await message.answer_photo(remote.url, caption=caption)
             return
-        except TelegramBadRequest as exc:
-            if is_unviewable_media_error(exc):
-                remember_unviewable_media(link)
-                logger.info("content not viewable for meme link media=%s url=%s", link.title, link.image_url)
-            else:
-                logger.info("cannot send meme link media=%s", link.title)
         except Exception:
-            logger.exception("failed to send meme fallback link %s", link.title)
+            logger.info("validated meme url still rejected by Telegram, falling back to text")
     await message.answer(reply)
+
+
+async def maybe_react(message: Message, bot: Bot, group: dict[str, Any], sentiment: float) -> None:
+    """Ogni tanto Allys reagisce con un'emoji invece di rispondere: vivace e leggero."""
+    if is_quiet(group) or not message.from_user:
+        return
+    if (group.get("meme_mode") or "medium") == "off":
+        return
+    magnitude = abs(sentiment)
+    probability = 0.04
+    if magnitude >= 1.0:
+        probability = 0.13
+    if magnitude >= 2.0:
+        probability = 0.22
+    if random.random() > probability:
+        return
+    if sentiment >= 0.5:
+        emoji = random.choice(_POSITIVE_REACTIONS)
+    elif sentiment <= -0.5:
+        emoji = random.choice(_NEGATIVE_REACTIONS)
+    else:
+        emoji = random.choice(_NEUTRAL_REACTIONS)
+    try:
+        await bot.set_message_reaction(message.chat.id, message.message_id, reaction=[ReactionTypeEmoji(emoji=emoji)])
+    except Exception:
+        logger.info("could not set reaction for chat_id=%s", message.chat.id)
+
+
+async def maybe_update_member_profile(chat_id: int, user_id: int) -> None:
+    """Aggiorna in background un profilo breve del membro (memoria a lungo termine).
+
+    Estrae solo interessi/tono/tormentoni, MAI nomi o dati personali sensibili.
+    """
+    try:
+        if not services.db.member_profile_due(chat_id, user_id):
+            return
+        texts = services.db.member_recent_texts(chat_id, user_id, limit=40)
+        if len(texts) < 6:
+            return
+        joined = "\n".join(f"- {sanitize_mentions(text)[:200]}" for text in texts if text.strip())
+        profile = await services.ollama.chat(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Estrai un profilo BREVE (max 4 righe, un punto per riga) di un utente di chat "
+                        "a partire dai suoi messaggi: interessi, tono, tormentoni, argomenti ricorrenti. "
+                        "NON includere nomi propri, username o dati personali/sensibili (salute, religione, "
+                        "politica, orientamento, indirizzi). Solo aspetti utili a conversare. Italiano, niente markdown."
+                    ),
+                },
+                {"role": "user", "content": f"Messaggi recenti:\n{joined}\n\nProfilo:"},
+            ],
+            num_predict=170,
+            temperature=0.4,
+        )
+        profile = sanitize_mentions((profile or "").strip())
+        if profile:
+            services.db.set_member_profile(chat_id, user_id, profile)
+    except Exception:
+        logger.info("member profile update failed for chat_id=%s user_id=%s", chat_id, user_id)
+
+
+def _looks_like_followup(text: str) -> bool:
+    stripped = (text or "").strip()
+    if not stripped or stripped.startswith("/"):
+        return False
+    if not (3 <= len(stripped) <= 220):
+        return False
+    return "?" in stripped or classify_intent(stripped) in {"question", "help"}
 
 
 async def remember_chat_media(message: Message) -> None:

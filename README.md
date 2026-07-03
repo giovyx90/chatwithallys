@@ -48,8 +48,25 @@ l'aria e tesa, piu pungente se il gruppo e su di giri. La scelta roast/utile non
 e piu casuale ma dipende dall'intento del messaggio (domande e richieste di aiuto
 ottengono sempre una risposta concreta) e dal `roast_level` del gruppo.
 Le risposte AI sono tenute brevi e gli `@username` vengono sostituiti con `@/`.
-Ogni tanto, se ha senso, puo accompagnare la risposta con GIF/video gia mandati
-nel gruppo o con un link meme controllato.
+Se in un thread appena avviato con Allys arriva un follow-up (una domanda), puo
+intervenire anche senza essere chiamata per nome, con finestra e cooldown
+anti-spam. Ricorda anche le proprie risposte, quindi la conversazione le "torna"
+come un vero botta-e-risposta.
+Ogni tanto, invece di rispondere, reagisce a un messaggio con un'emoji coerente
+con l'umore (usa lo stesso sentiment della borsa).
+Costruisce nel tempo un profilo breve di ogni membro (interessi, tono,
+tormentoni; mai nomi o dati sensibili) e lo usa come contesto interno.
+
+### Media/meme che funzionano
+
+Ogni tanto, se ha senso, Allys accompagna la risposta con GIF/video gia mandati
+nel gruppo (riuso affidabile via `file_id`). Come fallback cerca un meme reale
+online e **valida l'URL prima di inviarlo** (status, tipo e dimensione), cosi non
+compare piu "media non disponibile": se nulla e valido ripiega sul testo.
+Sorgenti: Giphy o Tenor se imposti `GIPHY_API_KEY` / `TENOR_API_KEY` (meme
+pertinenti alla conversazione), altrimenti fallback keyless su Reddit
+(`MEME_REDDIT_FALLBACK=true`). Con `/meme_test testo` gli admin vedono sia i
+media del gruppo sia l'URL online validato.
 Nei canali gestisce i `channel_post`: se il post contiene `Allys` puo commentare,
 e i comandi podcast possono essere usati se il bot e admin del canale.
 

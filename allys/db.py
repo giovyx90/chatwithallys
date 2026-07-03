@@ -102,6 +102,15 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS member_profiles (
+  chat_id BIGINT NOT NULL,
+  user_id BIGINT NOT NULL,
+  profile TEXT NOT NULL DEFAULT '',
+  messages_at_update BIGINT NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (chat_id, user_id)
+);
+
 CREATE TABLE IF NOT EXISTS chat_media (
   id BIGSERIAL PRIMARY KEY,
   chat_id BIGINT NOT NULL,
@@ -774,6 +783,71 @@ class Database:
                 (chat_id, limit),
             ).fetchall()
         return list(reversed(rows))
+
+    def member_recent_texts(self, chat_id: int, user_id: int, limit: int = 40) -> list[str]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT text
+                FROM messages
+                WHERE chat_id = %s AND user_id = %s AND length(text) >= 3
+                ORDER BY id DESC
+                LIMIT %s
+                """,
+                (chat_id, user_id, limit),
+            ).fetchall()
+        return [row["text"] for row in reversed(rows)]
+
+    def get_member_profile(self, chat_id: int, user_id: int) -> str:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT profile FROM member_profiles WHERE chat_id = %s AND user_id = %s",
+                (chat_id, user_id),
+            ).fetchone()
+        return (row["profile"] if row else "") or ""
+
+    def member_profile_due(self, chat_id: int, user_id: int, threshold: int = 25) -> bool:
+        """True se il membro ha accumulato abbastanza nuovi messaggi da giustificare
+        un aggiornamento del profilo (evita chiamate LLM inutili)."""
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT gu.message_count AS message_count,
+                       COALESCE(mp.messages_at_update, 0) AS messages_at_update,
+                       mp.profile AS profile
+                FROM group_users gu
+                LEFT JOIN member_profiles mp
+                  ON mp.chat_id = gu.chat_id AND mp.user_id = gu.user_id
+                WHERE gu.chat_id = %s AND gu.user_id = %s
+                """,
+                (chat_id, user_id),
+            ).fetchone()
+        if not row:
+            return False
+        message_count = int(row["message_count"] or 0)
+        at_update = int(row["messages_at_update"] or 0)
+        # Prima volta: serve un minimo di messaggi; poi ogni `threshold` nuovi.
+        if row["profile"] is None or not (row["profile"] or "").strip():
+            return message_count >= max(8, threshold // 2)
+        return message_count - at_update >= threshold
+
+    def set_member_profile(self, chat_id: int, user_id: int, profile: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO member_profiles (chat_id, user_id, profile, messages_at_update, updated_at)
+                VALUES (
+                    %s, %s, %s,
+                    COALESCE((SELECT message_count FROM group_users WHERE chat_id = %s AND user_id = %s), 0),
+                    now()
+                )
+                ON CONFLICT (chat_id, user_id)
+                DO UPDATE SET profile = EXCLUDED.profile,
+                              messages_at_update = EXCLUDED.messages_at_update,
+                              updated_at = now()
+                """,
+                (chat_id, user_id, profile.strip()[:600], chat_id, user_id),
+            )
 
     def add_chat_media(
         self,

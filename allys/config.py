@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     feature_predictions: bool = Field(False, alias="ALLY_FEATURE_PREDICTIONS")
     feature_credits: bool = Field(False, alias="ALLY_FEATURE_CREDITS")
     feature_podcast: bool = Field(True, alias="ALLY_FEATURE_PODCAST")
+    giphy_api_key: str = Field("", alias="GIPHY_API_KEY")
+    tenor_api_key: str = Field("", alias="TENOR_API_KEY")
+    meme_reddit_fallback: bool = Field(True, alias="MEME_REDDIT_FALLBACK")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", populate_by_name=True)
 

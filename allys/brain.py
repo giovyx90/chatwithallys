@@ -22,6 +22,10 @@ from allys.sentiment import mood_summary
 # Numero di messaggi recenti da dare in pasto al modello come contesto vivo.
 HISTORY_TURNS = 12
 
+# Username sentinella con cui salviamo i messaggi di Allys, cosi la trascrizione
+# diventa un vero botta-e-risposta invece di soli messaggi utente.
+BOT_AUTHOR = "Allys"
+
 _QUESTION_RE = re.compile(r"\?|\b(come|perche|perché|quando|dove|quanto|quale|quali|cosa|chi|puoi|sai|mi\s+spieghi|consigli|aiut)\w*", re.IGNORECASE)
 _HELP_MARKERS = (
     "aiuto", "aiutami", "aiutare", "spiega", "spiegami", "come si", "come faccio",
@@ -163,15 +167,23 @@ def speaker_aliases(messages: list[dict[str, Any]]) -> dict[str, str]:
     Cosi il modello puo seguire *chi dice cosa* senza mai vedere nomi reali.
     """
     aliases: dict[str, str] = {}
+    human_index = 0
     for row in messages:
         key = _speaker_key(row)
-        if key not in aliases:
-            aliases[key] = f"utente {chr(65 + (len(aliases) % 26))}"
+        if key in aliases:
+            continue
+        if key == "allys":
+            aliases[key] = BOT_AUTHOR
+        else:
+            aliases[key] = f"utente {chr(65 + (human_index % 26))}"
+            human_index += 1
     return aliases
 
 
 def _speaker_key(row: dict[str, Any]) -> str:
     username = row.get("username")
+    if username is not None and str(username).lower() == BOT_AUTHOR.lower():
+        return "allys"
     if username:
         return f"u:{str(username).lower()}"
     return "anon"
