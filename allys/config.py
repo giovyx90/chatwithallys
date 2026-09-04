@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     giphy_api_key: str = Field("", alias="GIPHY_API_KEY")
     tenor_api_key: str = Field("", alias="TENOR_API_KEY")
     meme_reddit_fallback: bool = Field(True, alias="MEME_REDDIT_FALLBACK")
+    telegram_auto_webhook: bool = Field(True, alias="TELEGRAM_AUTO_WEBHOOK")
+    market_report_time: str = Field("21:00", alias="MARKET_REPORT_TIME")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", populate_by_name=True)
 

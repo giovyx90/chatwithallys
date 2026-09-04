@@ -128,6 +128,8 @@ def build_system_prompt(
     roast_level: str,
     mood_label: str,
     minigame_context: str = "",
+    style_block: str = "",
+    spontaneous: bool = False,
 ) -> str:
     """System prompt ricco e coerente."""
     guardrails = (
@@ -153,6 +155,15 @@ def build_system_prompt(
         "segui il filo del discorso e hai memoria di cosa si e detto.\n"
         f"{style}\n{mode_line}\n{guardrails}"
     )
+    if spontaneous:
+        prompt += (
+            "\nStai parlando di tua iniziativa: nessuno ti ha chiamata. Quindi una frase "
+            "sola, che aggiunge qualcosa. Se non hai niente di buono da dire, dillo corto."
+        )
+    if style_block:
+        # Il pezzo che rende Allys *di questo gruppo*: lessico e risposte
+        # che qui hanno gia' funzionato davvero.
+        prompt += f"\n{style_block}"
     if minigame_context:
         prompt += (
             "\nContesto sui minigiochi del gruppo (usalo solo se pertinente, con tono "

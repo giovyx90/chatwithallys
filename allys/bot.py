@@ -9,12 +9,21 @@ import re
 import time
 from base64 import urlsafe_b64encode
 from datetime import UTC, datetime, timedelta
+from dataclasses import replace
 from typing import Any
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.types import FSInputFile, Message, Poll, ReactionTypeEmoji, WebAppInfo
+from aiogram.types import (
+    BufferedInputFile,
+    FSInputFile,
+    Message,
+    MessageReactionUpdated,
+    Poll,
+    ReactionTypeEmoji,
+    WebAppInfo,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from allys.db import Database
@@ -43,6 +52,24 @@ from allys.brain import (
 )
 from allys.media import fetch_working_meme
 from allys.sentiment import mood_summary
+from allys import charts
+from allys.autonomy import (
+    ChatterState,
+    blocking_reason,
+    decide as autonomy_decide,
+    parse_level,
+    prompt_for,
+)
+from allys.learning import (
+    extract_lexicon,
+    is_explicit_shutup,
+    format_style_block,
+    looks_like_shutup,
+    reactions_delta,
+    reply_delta,
+    select_style_examples,
+    tone_adjustment,
+)
 
 
 router = Router()
@@ -78,6 +105,21 @@ _LAST_ALLYS_REPLY_AT: dict[int, float] = {}
 _LAST_PROACTIVE_AT: dict[int, float] = {}
 _PROACTIVE_WINDOW_SECONDS = 150
 _PROACTIVE_COOLDOWN_SECONDS = 90
+
+# Ultimo messaggio di Allys per chat: serve per attribuirle il voto quando
+# qualcuno reagisce, risponde o le dice di stare zitta.
+_LAST_ALLYS_MESSAGE_ID: dict[int, int] = {}
+
+# Il lessico del gruppo e il gradimento cambiano lentamente: calcolarli a ogni
+# messaggio sarebbe uno spreco, quindi restano in cache per qualche minuto.
+_STYLE_CACHE: dict[int, tuple[float, str]] = {}
+_STYLE_CACHE_TTL = 600
+_TONE_CACHE: dict[int, tuple[float, dict[str, Any]]] = {}
+_TONE_CACHE_TTL = 600
+
+# Quanto dura di default un "zitta" e quanto puo' durare al massimo.
+_QUIET_DEFAULT = timedelta(minutes=30)
+_QUIET_MAX = timedelta(days=7)
 
 # Emoji di reazione mappate all'umore del messaggio (solo emoji ammesse da Telegram).
 _POSITIVE_REACTIONS = ["🔥", "👍", "🥰", "😁", "🎉", "🤩", "👏", "💯"]
@@ -254,6 +296,8 @@ async def allys_help(message: Message) -> None:
         "Chat intelligente in gruppo/DM: rispondo solo se scrivi Allys o mi scrivi in risposta.\n"
         "Seguo il filo del discorso e mi adatto all'umore del gruppo.\n"
         "Comandi base: /allys, /allys_status, /recap, /mood, /borsa, /portfolio, /prezzo, /azioni, /lavora, /daily, /memoria, /roast_level\n"
+        "Per farmi tacere (vale per tutti, non solo admin): /zitta, /zitta 2h, /parla. Anche solo scrivendomi 'Allys stai zitta'.\n"
+        "/autonomia mostra quanto parlo di mia iniziativa.\n"
         "Comandi giochi: /market (nella Mini App), /arcade, /place, /podcast, /podcast_config, /podcast_now\n"
         "Admin: /allys_off /allys_on /allys_pause 30m, /meme_mode, /azienda_crea, /azienda_approva, /azienda_pausa, /azienda_modifica, /azienda_elimina, /azienda_reset_prezzi"
     )
@@ -324,6 +368,7 @@ async def borsa(message: Message, bot: Bot) -> None:
         )
         requested_group = _match_group_reference(groups, requested_argument)
         if requested_group:
+            await send_board_image(message, int(requested_group["chat_id"]), requested_group.get("title"))
             url = app_session_url(message, "market", int(requested_group["chat_id"]))
             await _send_private_miniapp_link(
                 message,
@@ -349,6 +394,7 @@ async def borsa(message: Message, bot: Bot) -> None:
                         _display_name(message.from_user),
                         points=0,
                     )
+                    await send_board_image(message, numeric_group_id)
                     url = app_session_url(message, "market", numeric_group_id)
                     await _send_private_miniapp_link(
                         message,
@@ -369,6 +415,7 @@ async def borsa(message: Message, bot: Bot) -> None:
             )
             return
         if len(groups) == 1:
+            await send_board_image(message, int(groups[0]["chat_id"]), groups[0].get("title"))
             url = app_session_url(message, "market", int(groups[0]["chat_id"]))
             await _send_private_miniapp_link(
                 message,
@@ -388,14 +435,9 @@ async def borsa(message: Message, bot: Bot) -> None:
         lines.append("Comando rapido: /borsa <chat_id> o /borsa <nome gruppo>.")
         await message.answer("\n".join(lines), reply_markup=builder.as_markup())
         return
-    url = app_session_url(message, "market")
-    await _send_private_miniapp_link(
-        message,
-        bot,
-        "Apri Allys Borsa",
-        url,
-        "Ho preparato la tua borsa personale.",
-    )
+    # Nel gruppo l'immagine basta e avanza: la mini app resta un pulsante per chi
+    # la vuole davvero, ma nessuno e' costretto ad aprirla per vedere i prezzi.
+    await send_board_image(message, message.chat.id, message.chat.title, with_button=True)
 
 
 @router.message(Command("azioni"))
@@ -428,6 +470,8 @@ async def prezzo(message: Message) -> None:
     asset = services.db.asset(message.chat.id, symbol)
     if not asset:
         await message.answer("Azienda non trovata.")
+        return
+    if await send_asset_image(message, message.chat.id, symbol):
         return
     await message.answer(
         f"{asset['symbol']} - {asset['name']}\n"
@@ -562,6 +606,21 @@ async def portfolio(message: Message) -> None:
         await disabled(message)
         return
     await ensure_context(message)
+    if not message.from_user:
+        await message.answer("Il profilo non e' disponibile in questo messaggio.")
+        return
+    try:
+        data = services.db.user_portfolio(message.chat.id, message.from_user.id)
+        png = await asyncio.to_thread(
+            charts.render_portfolio,
+            _display_name(message.from_user),
+            data.get("crowns", 0),
+            [dict(row) for row in data.get("holdings", [])],
+        )
+        await message.answer_photo(BufferedInputFile(png, filename="portafoglio.png"))
+        return
+    except Exception:
+        logger.exception("portfolio image failed for chat_id=%s", message.chat.id)
     await message.answer(services.market.portfolio_text(message.chat.id, message.from_user.id))
 
 
@@ -576,7 +635,9 @@ async def buy(message: Message) -> None:
     if len(parts) != 2:
         await message.answer("Uso: /compra MEME 2")
         return
-    await message.answer(services.market.trade_text(message.chat.id, message.from_user.id, "buy", parts[0], parts[1]))
+    result = services.market.trade_text(message.chat.id, message.from_user.id, "buy", parts[0], parts[1])
+    if not await send_asset_image(message, message.chat.id, parts[0], caption=result):
+        await message.answer(result)
 
 
 @router.message(Command("vendi"))
@@ -590,7 +651,9 @@ async def sell(message: Message) -> None:
     if len(parts) != 2:
         await message.answer("Uso: /vendi MEME 2")
         return
-    await message.answer(services.market.trade_text(message.chat.id, message.from_user.id, "sell", parts[0], parts[1]))
+    result = services.market.trade_text(message.chat.id, message.from_user.id, "sell", parts[0], parts[1])
+    if not await send_asset_image(message, message.chat.id, parts[0], caption=result):
+        await message.answer(result)
 
 
 @router.message(Command("azienda_crea"))
@@ -980,6 +1043,70 @@ async def mood_cmd(message: Message) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Silenzio: "zitta" lo puo' dire chiunque, non serve essere admin.
+# ---------------------------------------------------------------------------
+
+
+@router.message(Command(commands=["zitta", "zitto", "silenzio", "muta"]))
+@router.channel_post(Command(commands=["zitta", "zitto", "silenzio", "muta"]))
+async def quiet_command(message: Message) -> None:
+    await ensure_context(message)
+    duration = parse_duration(command_arg(message).strip()) or _QUIET_DEFAULT
+    duration = min(duration, _QUIET_MAX)
+    who = _display_name(message.from_user) if message.from_user else "qualcuno"
+    services.db.set_quiet(message.chat.id, datetime.now(UTC) + duration, who)
+    # Se la zittiscono, l'ultima cosa che ha detto non andava: e' un voto.
+    penalize_last_reply(message.chat.id, "zittita")
+    await message.answer(
+        f"Va bene, sto zitta per {human_duration(duration)}. Quando volete: /parla."
+    )
+
+
+@router.message(Command(commands=["parla", "torna", "unmute"]))
+@router.channel_post(Command(commands=["parla", "torna", "unmute"]))
+async def speak_command(message: Message) -> None:
+    group = await ensure_context(message)
+    services.db.clear_quiet(message.chat.id)
+    if not group.get("bot_enabled", True):
+        await message.answer("Il silenzio e' tolto, ma un admin mi ha spenta del tutto: serve /allys_on.")
+        return
+    await message.answer("Rieccomi.")
+
+
+@router.message(Command("autonomia"))
+async def autonomia_command(message: Message, bot: Bot) -> None:
+    group = await ensure_context(message)
+    argument = command_arg(message).strip().lower()
+    if not argument:
+        stats = services.db.reply_feedback_stats(message.chat.id)
+        tone = tone_adjustment(stats)
+        await message.answer(
+            f"Autonomia: {group.get('autonomy_level') or 'media'}.\n"
+            f"Gradimento: {tone['verdict']} ({stats['samples']} voti su {stats['total']} risposte).\n"
+            "Livelli: off, bassa, media, alta. Cambia con /autonomia media (solo admin).\n"
+            "Per farmi tacere subito bastano /zitta e /parla, e quelli valgono per tutti."
+        )
+        return
+    if not await can_manage_chat(bot, message):
+        await message.answer(
+            "Il livello lo cambiano gli admin. Tu pero' puoi sempre usare /zitta per farmi tacere."
+        )
+        return
+    level = parse_level(argument)
+    if not level:
+        await message.answer("Uso: /autonomia off|bassa|media|alta")
+        return
+    services.db.set_autonomy_level(message.chat.id, level)
+    descriptions = {
+        "off": "non parlo piu' di mia iniziativa.",
+        "bassa": "intervengo da sola al massimo un paio di volte al giorno.",
+        "media": "intervengo da sola qualche volta al giorno, se la chat e' viva.",
+        "alta": "mi intrometto spesso quando vi vedo accesi.",
+    }
+    await message.answer(f"Autonomia impostata su {level}: {descriptions[level]}")
+
+
 @router.message(F.poll)
 async def poll_comment(message: Message) -> None:
     group = await ensure_context(message)
@@ -1004,8 +1131,8 @@ async def media_message(message: Message, bot: Bot) -> None:
             await services.rag.remember(message.chat.id, row_id, caption, {"username": message.from_user.username, "media": True})
         if caption and not is_quiet(group) and await should_reply(message, bot, group):
             try:
-                reply = await build_reply(message, group)
-                await send_allys_reply(message, group, reply)
+                reply, meta = await build_reply(message, group)
+                await send_allys_reply(message, group, reply, meta)
             except Exception:
                 logger.exception("failed to build media AI reply for chat_id=%s", message.chat.id)
                 await message.answer(_local_brain_error_text())
@@ -1021,11 +1148,14 @@ async def group_text(message: Message, bot: Bot) -> None:
     row_id = services.db.add_message(message.chat.id, message.from_user.id, message.from_user.username, text, sentiment)
     if should_remember(text):
         await services.rag.remember(message.chat.id, row_id, text, {"username": message.from_user.username})
+    await learn_from_reply(message, bot, text)
+    if await handle_shutup_request(message, bot, text):
+        return
     replied = False
     if not is_quiet(group) and await should_reply(message, bot, group):
         try:
-            reply = await build_reply(message, group)
-            await send_allys_reply(message, group, reply)
+            reply, meta = await build_reply(message, group)
+            await send_allys_reply(message, group, reply, meta)
             replied = True
         except Exception:
             logger.exception("failed to build AI reply for chat_id=%s", message.chat.id)
@@ -1050,8 +1180,8 @@ async def channel_text(message: Message, bot: Bot) -> None:
         await services.rag.remember(message.chat.id, row_id, text, {"channel": True})
     if not is_quiet(group) and text and "allys" in text.lower():
         try:
-            reply = await build_reply(message, group)
-            await send_allys_reply(message, group, reply)
+            reply, meta = await build_reply(message, group)
+            await send_allys_reply(message, group, reply, meta)
         except Exception:
             logger.exception("failed to build channel AI reply for chat_id=%s", message.chat.id)
             await message.answer(_local_brain_error_text())
@@ -1085,7 +1215,7 @@ async def should_reply(message: Message, bot: Bot, group: dict[str, Any]) -> boo
     return False
 
 
-async def build_reply(message: Message, group: dict[str, Any]) -> str:
+async def build_reply(message: Message, group: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     text = message.text or message.caption or ""
     chat_id = message.chat.id
     roast_level = group.get("roast_level", "medium")
@@ -1102,10 +1232,16 @@ async def build_reply(message: Message, group: dict[str, Any]) -> str:
         intent = "minigame"
     mode = choose_mode(intent, roast_level, mood_label)
 
+    # Il gradimento accumulato sposta l'ago: se il gruppo la trova pesante, Allys
+    # vira sull'utile e si accorcia da sola.
+    tone = tone_for(chat_id)
+    if mode == "roast" and random.random() < float(tone.get("helpful_bonus", 0.0)):
+        mode = "helpful"
+
     docs = await services.rag.search(chat_id, text)
     memory = "\n".join(f"- {sanitize_mentions(doc.get('text') or '')}" for doc in docs[:3])
     minigame_ctx = build_minigame_context(message) if serious_minigame else ""
-    system = build_system_prompt(mode, roast_level, mood_label, minigame_ctx)
+    system = build_system_prompt(mode, roast_level, mood_label, minigame_ctx, style_block(chat_id))
 
     profile = ""
     if message.from_user:
@@ -1132,8 +1268,10 @@ async def build_reply(message: Message, group: dict[str, Any]) -> str:
         num_predict=response_budget(intent),
         temperature=0.68 if mode == "helpful" else 0.88,
     )
-    max_chars = 420 if intent in {"help", "question", "minigame"} else 300
-    return shorten_reply(sanitize_mentions(reply), max_chars=max_chars)
+    base_chars = 420 if intent in {"help", "question", "minigame"} else 300
+    max_chars = max(120, int(base_chars * float(tone.get("length_factor", 1.0))))
+    meta = {"mode": mode, "intent": intent, "prompt": text, "spontaneous": False}
+    return shorten_reply(sanitize_mentions(reply), max_chars=max_chars), meta
 
 
 def is_minigame_query(text: str) -> bool:
@@ -1188,11 +1326,16 @@ def build_minigame_context(message: Message) -> str:
     return "\n".join(lines)
 
 
-async def send_allys_reply(message: Message, group: dict[str, Any], reply: str) -> None:
+async def send_allys_reply(
+    message: Message, group: dict[str, Any], reply: str, meta: dict[str, Any] | None = None
+) -> None:
+    sent: Message | None = None
     try:
-        await _deliver_allys_reply(message, group, reply)
+        sent = await _deliver_allys_reply(message, group, reply)
     finally:
         _remember_allys_message(message.chat.id, reply)
+    if sent is not None:
+        track_allys_message(message.chat.id, sent.message_id, reply, meta or {})
 
 
 def _remember_allys_message(chat_id: int, reply: str) -> None:
@@ -1208,11 +1351,10 @@ def _remember_allys_message(chat_id: int, reply: str) -> None:
         logger.info("could not persist Allys reply for chat_id=%s", chat_id)
 
 
-async def _deliver_allys_reply(message: Message, group: dict[str, Any], reply: str) -> None:
+async def _deliver_allys_reply(message: Message, group: dict[str, Any], reply: str) -> Message | None:
     prompt = message.text or message.caption or ""
     if not should_attach_meme(group.get("meme_mode") or "medium", prompt, reply):
-        await message.answer(reply)
-        return
+        return await message.answer(reply)
     query = f"{prompt} {reply}"
     media_types = desired_media_types(prompt)
     rows = services.db.search_chat_media(message.chat.id, query, media_types=media_types, limit=5)
@@ -1221,15 +1363,15 @@ async def _deliver_allys_reply(message: Message, group: dict[str, Any], reply: s
         caption = meme_caption(reply)
         try:
             if row["media_type"] in {"animation", "gif_document"}:
-                await message.answer_animation(row["file_id"], caption=caption)
+                sent = await message.answer_animation(row["file_id"], caption=caption)
             elif row["media_type"] == "video_note":
-                await message.answer_video_note(row["file_id"])
+                sent = await message.answer_video_note(row["file_id"])
             elif row["media_type"] in {"video", "video_document"}:
-                await message.answer_video(row["file_id"], caption=caption)
+                sent = await message.answer_video(row["file_id"], caption=caption)
             else:
-                await message.answer_document(row["file_id"], caption=caption)
+                sent = await message.answer_document(row["file_id"], caption=caption)
             services.db.mark_chat_media_used(int(row["id"]))
-            return
+            return sent
         except TelegramBadRequest:
             logger.info("disabling invalid meme media id=%s chat_id=%s", row["id"], message.chat.id)
             services.db.disable_chat_media(int(row["id"]))
@@ -1252,15 +1394,15 @@ async def _deliver_allys_reply(message: Message, group: dict[str, Any], reply: s
         caption = meme_caption(reply)
         try:
             if remote.media_type == "gif":
-                await message.answer_animation(remote.url, caption=caption)
+                sent = await message.answer_animation(remote.url, caption=caption)
             elif remote.media_type == "video":
-                await message.answer_video(remote.url, caption=caption)
+                sent = await message.answer_video(remote.url, caption=caption)
             else:
-                await message.answer_photo(remote.url, caption=caption)
-            return
+                sent = await message.answer_photo(remote.url, caption=caption)
+            return sent
         except Exception:
             logger.info("validated meme url still rejected by Telegram, falling back to text")
-    await message.answer(reply)
+    return await message.answer(reply)
 
 
 async def maybe_react(message: Message, bot: Bot, group: dict[str, Any], sentiment: float) -> None:
@@ -1513,6 +1655,12 @@ def is_quiet(group: dict[str, Any]) -> bool:
 def quiet_status(group: dict[str, Any]) -> str | None:
     if not group.get("bot_enabled", True):
         return "spenta"
+    quiet_until = group.get("quiet_until")
+    if quiet_until and quiet_until > datetime.now(UTC):
+        who = group.get("quiet_by") or "qualcuno"
+        return f"zitta fino a {quiet_until.strftime('%H:%M')} UTC (glielo ha chiesto {who})"
+    if quiet_until:
+        services.db.clear_quiet(int(group["chat_id"]))
     paused_until = group.get("paused_until")
     if paused_until and paused_until > datetime.now(UTC):
         return f"in pausa fino a {paused_until.strftime('%Y-%m-%d %H:%M')} UTC"
@@ -1561,3 +1709,339 @@ def feature(name: str) -> bool:
 
 async def disabled(message: Message) -> None:
     await message.answer("Funzione temporaneamente disattivata.")
+
+
+# ---------------------------------------------------------------------------
+# Apprendimento continuo: Allys si costruisce lo stile leggendo i voti che il
+# gruppo le da' senza accorgersene (reaction, risposte, "zitta").
+# ---------------------------------------------------------------------------
+
+
+def style_block(chat_id: int) -> str:
+    """Lessico del gruppo + risposte che qui hanno funzionato, gia' in formato prompt."""
+    now = time.time()
+    cached = _STYLE_CACHE.get(chat_id)
+    if cached and (now - cached[0]) < _STYLE_CACHE_TTL:
+        return cached[1]
+    try:
+        examples = select_style_examples(services.db.best_reply_examples(chat_id, limit=3))
+        lexicon = extract_lexicon(services.db.lexicon_messages(chat_id, limit=400))
+        block = format_style_block(examples, lexicon)
+    except Exception:
+        logger.info("style block non disponibile per chat_id=%s", chat_id)
+        block = ""
+    _STYLE_CACHE[chat_id] = (now, block)
+    return block
+
+
+def tone_for(chat_id: int) -> dict[str, Any]:
+    """Quanto e' gradita ultimamente, tradotto in lunghezza e voglia di aiutare."""
+    now = time.time()
+    cached = _TONE_CACHE.get(chat_id)
+    if cached and (now - cached[0]) < _TONE_CACHE_TTL:
+        return cached[1]
+    try:
+        tone = tone_adjustment(services.db.reply_feedback_stats(chat_id))
+    except Exception:
+        logger.info("tone stats non disponibili per chat_id=%s", chat_id)
+        tone = tone_adjustment(None)
+    _TONE_CACHE[chat_id] = (now, tone)
+    return tone
+
+
+def track_allys_message(chat_id: int, message_id: int, reply: str, meta: dict[str, Any]) -> None:
+    """Mette la risposta appena inviata in attesa del giudizio del gruppo."""
+    _LAST_ALLYS_MESSAGE_ID[chat_id] = message_id
+    try:
+        services.db.record_allys_reply(
+            chat_id,
+            message_id,
+            str(meta.get("prompt") or ""),
+            reply,
+            mode=str(meta.get("mode") or ""),
+            intent=str(meta.get("intent") or ""),
+            spontaneous=bool(meta.get("spontaneous")),
+        )
+    except Exception:
+        logger.info("non ho potuto archiviare la risposta per chat_id=%s", chat_id)
+
+
+def penalize_last_reply(chat_id: int, signal: str, delta: float = -1.5) -> None:
+    """Voto negativo sull'ultima cosa detta da Allys in questa chat."""
+    message_id = _LAST_ALLYS_MESSAGE_ID.get(chat_id)
+    if not message_id:
+        return
+    try:
+        services.db.bump_reply_score(chat_id, message_id, delta, signal)
+        _TONE_CACHE.pop(chat_id, None)
+    except Exception:
+        logger.info("non ho potuto registrare il voto negativo per chat_id=%s", chat_id)
+
+
+async def learn_from_reply(message: Message, bot: Bot, text: str) -> None:
+    """Se qualcuno risponde a un messaggio di Allys, quella risposta e' un voto."""
+    replied = message.reply_to_message
+    if not replied or not replied.from_user:
+        return
+    try:
+        me = await bot.me()
+    except Exception:
+        return
+    if replied.from_user.id != me.id:
+        return
+    delta = reply_delta(text)
+    if not delta:
+        return
+    try:
+        services.db.bump_reply_score(message.chat.id, replied.message_id, delta, "risposta")
+        _TONE_CACHE.pop(message.chat.id, None)
+    except Exception:
+        logger.info("non ho potuto registrare il voto da risposta per chat_id=%s", message.chat.id)
+
+
+async def handle_shutup_request(message: Message, bot: Bot, text: str) -> bool:
+    """"Allys stai zitta" vale come /zitta: chiunque, senza comandi da ricordare."""
+    if not is_explicit_shutup(text):
+        return False
+    lowered = text.lower()
+    targeted = "allys" in lowered
+    if not targeted and message.reply_to_message and message.reply_to_message.from_user:
+        try:
+            me = await bot.me()
+            targeted = message.reply_to_message.from_user.id == me.id
+        except Exception:
+            targeted = False
+    if not targeted:
+        return False
+    who = _display_name(message.from_user) if message.from_user else "qualcuno"
+    services.db.set_quiet(message.chat.id, datetime.now(UTC) + _QUIET_DEFAULT, who)
+    penalize_last_reply(message.chat.id, "zittita a voce")
+    await message.answer(f"Ok, sparisco per {human_duration(_QUIET_DEFAULT)}. Per riavermi: /parla.")
+    return True
+
+
+@router.message_reaction()
+async def reaction_feedback(event: MessageReactionUpdated) -> None:
+    """Le reaction sui messaggi di Allys sono il voto piu' onesto che riceve."""
+    old = [getattr(item, "emoji", None) for item in (event.old_reaction or [])]
+    new = [getattr(item, "emoji", None) for item in (event.new_reaction or [])]
+    delta = reactions_delta([e for e in old if e], [e for e in new if e])
+    if not delta:
+        return
+    try:
+        updated = services.db.bump_reply_score(event.chat.id, event.message_id, delta, "reaction")
+        if updated is not None:
+            _TONE_CACHE.pop(event.chat.id, None)
+    except Exception:
+        logger.info("non ho potuto registrare la reaction per chat_id=%s", event.chat.id)
+
+
+def human_duration(delta: timedelta) -> str:
+    minutes = int(delta.total_seconds() // 60)
+    if minutes < 60:
+        return f"{minutes} minuti"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} ore" if hours > 1 else "un'ora"
+    days = hours // 24
+    return f"{days} giorni" if days > 1 else "un giorno"
+
+
+# ---------------------------------------------------------------------------
+# La borsa come immagine: si guarda scorrendo la chat, senza aprire nulla.
+# ---------------------------------------------------------------------------
+
+
+async def send_board_image(
+    message: Message,
+    chat_id: int,
+    title: str | None = None,
+    caption: str | None = None,
+    with_button: bool = False,
+) -> bool:
+    """Manda il listino del gruppo come PNG. Torna False se non ce l'ha fatta."""
+    try:
+        rows = await asyncio.to_thread(services.db.board_rows, chat_id)
+        png = await asyncio.to_thread(charts.render_board, title or "", rows)
+    except Exception:
+        logger.exception("board image failed for chat_id=%s", chat_id)
+        return False
+    markup = None
+    if with_button:
+        builder = InlineKeyboardBuilder()
+        add_app_button(builder, message, "Apri la mini app", app_session_url(message, "market", chat_id))
+        markup = builder.as_markup()
+    try:
+        await message.answer_photo(
+            BufferedInputFile(png, filename="borsa.png"),
+            caption=caption,
+            reply_markup=markup,
+        )
+        return True
+    except Exception:
+        logger.exception("board image send failed for chat_id=%s", chat_id)
+        return False
+
+
+async def send_asset_image(message: Message, chat_id: int, symbol: str, caption: str | None = None) -> bool:
+    """Manda la scheda di un titolo come PNG."""
+    try:
+        card = await asyncio.to_thread(services.db.asset_card, chat_id, symbol.strip().upper())
+        if not card:
+            return False
+        png = await asyncio.to_thread(charts.render_asset, card["asset"], card["history"], card["stats"])
+    except Exception:
+        logger.exception("asset image failed for chat_id=%s symbol=%s", chat_id, symbol)
+        return False
+    try:
+        await message.answer_photo(
+            BufferedInputFile(png, filename=f"{symbol.upper()}.png"),
+            caption=caption[:1000] if caption else None,
+        )
+        return True
+    except Exception:
+        logger.exception("asset image send failed for chat_id=%s", chat_id)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Autonomia: ogni tanto parla per prima, ma con freni veri.
+# ---------------------------------------------------------------------------
+
+
+async def build_spontaneous_reply(
+    chat_id: int, group: dict[str, Any], kind: str, movers: list[dict[str, Any]]
+) -> str:
+    recent = services.db.recent_messages(chat_id, limit=HISTORY_TURNS + 2)
+    mood_label = str(group_mood(recent).get("label", "neutro"))
+    roast_level = group.get("roast_level", "medium")
+    tone = tone_for(chat_id)
+    mode = choose_mode("banter", roast_level, mood_label)
+    if mode == "roast" and random.random() < float(tone.get("helpful_bonus", 0.0)):
+        mode = "helpful"
+    system = build_system_prompt(
+        mode, roast_level, mood_label, "", style_block(chat_id), spontaneous=True
+    )
+    parts: list[str] = []
+    transcript = format_transcript(recent, limit=HISTORY_TURNS)
+    if transcript:
+        parts.append(f"Come si sta svolgendo la conversazione (anonimizzata):\n{transcript}")
+    if kind == "borsa" and movers:
+        mover = movers[0]
+        parts.append(
+            f"In borsa {mover['symbol']} ({mover['name']}) sta a {mover['price']:.2f} Crowns, "
+            f"{mover['change_pct'] * 100:+.1f}% nelle ultime ore."
+        )
+    parts.append(prompt_for(kind))
+    reply = await services.ollama.chat(
+        [
+            {"role": "system", "content": system},
+            {"role": "user", "content": "\n\n".join(parts)},
+        ],
+        num_predict=120,
+        temperature=0.9,
+    )
+    max_chars = max(90, int(220 * float(tone.get("length_factor", 1.0))))
+    return shorten_reply(sanitize_mentions(reply), max_chars=max_chars)
+
+
+async def maybe_speak_spontaneously(bot: Bot, chat_id: int) -> bool:
+    """Decide e, se e' il caso, parla per prima. Chiamata dallo scheduler."""
+    group = services.db.group_settings(chat_id)
+    if not group or is_quiet(group):
+        return False
+    level = str(group.get("autonomy_level") or "media")
+    if level == "off":
+        return False
+    activity = services.db.chat_activity(chat_id)
+    state = ChatterState(
+        quiet=False,
+        seconds_since_last_human=float(activity["seconds_since_last_human"]),
+        seconds_since_last_allys=float(activity["seconds_since_last_allys"]),
+        new_messages_since_allys=int(activity["new_messages"]),
+        unique_speakers=int(activity["unique_speakers"]),
+        energy=float(activity["energy"]),
+        interventions_today=services.db.spontaneous_today(chat_id),
+        pending_question=bool(activity["pending_question"]),
+    )
+    # Quasi sempre la risposta e' "no": i cancelli deterministici costano nulla,
+    # quindi i dati di borsa li andiamo a prendere solo se la strada e' libera.
+    if blocking_reason(state, level):
+        return False
+    movers = services.db.market_movers(chat_id, hours=3, limit=1) if feature("market") else []
+    if movers:
+        state = replace(state, market_move=float(movers[0]["change_pct"]))
+    decision = autonomy_decide(state, level)
+    if not decision.speak:
+        return False
+
+    reply = await build_spontaneous_reply(chat_id, group, decision.kind, movers)
+    if not reply:
+        return False
+    sent: Message | None = None
+    if decision.kind == "borsa" and movers:
+        try:
+            rows = await asyncio.to_thread(services.db.board_rows, chat_id)
+            png = await asyncio.to_thread(charts.render_board, group.get("title") or "", rows)
+            sent = await bot.send_photo(
+                chat_id, BufferedInputFile(png, filename="borsa.png"), caption=reply[:1000]
+            )
+        except Exception:
+            logger.info("board image spontanea fallita per chat_id=%s", chat_id)
+    if sent is None:
+        sent = await bot.send_message(chat_id, reply)
+
+    _remember_allys_message(chat_id, reply)
+    track_allys_message(
+        chat_id, sent.message_id, reply, {"intent": decision.kind, "spontaneous": True, "prompt": ""}
+    )
+    logger.info("intervento spontaneo (%s) in chat_id=%s, urge=%s", decision.kind, chat_id, decision.urge)
+    return True
+
+
+async def send_market_report(bot: Bot, chat_id: int) -> bool:
+    """Il riepilogo quotidiano della borsa, come immagine."""
+    group = services.db.group_settings(chat_id)
+    if not group or is_quiet(group):
+        return False
+    try:
+        rows = await asyncio.to_thread(services.db.board_rows, chat_id)
+    except Exception:
+        logger.exception("market report data failed for chat_id=%s", chat_id)
+        return False
+    movers = [row for row in rows if abs(row["change_pct"]) > 0.005]
+    if not movers:
+        return False
+    caption = "Chiusura di giornata."
+    try:
+        best = movers[0]
+        caption = await services.ollama.chat(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Sei Allys. Scrivi UNA frase da cronista di borsa sarcastica sul titolo "
+                        "del giorno di un gruppo di amici. Italiano, niente markdown, niente hashtag."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Titolo del giorno: {best['symbol']} ({best['name']}), "
+                        f"{best['change_pct'] * 100:+.1f}% a {best['price']:.2f} Crowns."
+                    ),
+                },
+            ],
+            num_predict=70,
+            temperature=0.85,
+        )
+        caption = shorten_reply(sanitize_mentions(caption), max_chars=220)
+    except Exception:
+        logger.info("commento di chiusura non disponibile per chat_id=%s", chat_id)
+    try:
+        png = await asyncio.to_thread(charts.render_board, group.get("title") or "", rows)
+        await bot.send_photo(chat_id, BufferedInputFile(png, filename="chiusura.png"), caption=caption)
+        return True
+    except Exception:
+        logger.exception("market report send failed for chat_id=%s", chat_id)
+        return False
