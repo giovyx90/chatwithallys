@@ -287,6 +287,24 @@ CREATE TABLE IF NOT EXISTS place_snapshots (
   last_seq BIGINT NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS reply_feedback (
+  id BIGSERIAL PRIMARY KEY,
+  chat_id BIGINT NOT NULL,
+  message_id BIGINT NOT NULL,
+  prompt_text TEXT NOT NULL DEFAULT '',
+  reply_text TEXT NOT NULL,
+  mode TEXT,
+  intent TEXT,
+  spontaneous BOOLEAN NOT NULL DEFAULT false,
+  score NUMERIC NOT NULL DEFAULT 0,
+  signals JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (chat_id, message_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_reply_feedback_best ON reply_feedback (chat_id, score DESC);
+CREATE INDEX IF NOT EXISTS idx_reply_feedback_recent ON reply_feedback (chat_id, created_at DESC);
 """
 
 MIGRATIONS = [
@@ -294,6 +312,9 @@ MIGRATIONS = [
     "ALTER TABLE groups ADD COLUMN IF NOT EXISTS paused_until TIMESTAMPTZ",
     "ALTER TABLE groups ADD COLUMN IF NOT EXISTS meme_mode TEXT NOT NULL DEFAULT 'medium'",
     "ALTER TABLE groups ALTER COLUMN spontaneous_chance SET DEFAULT 0",
+    "ALTER TABLE groups ADD COLUMN IF NOT EXISTS quiet_until TIMESTAMPTZ",
+    "ALTER TABLE groups ADD COLUMN IF NOT EXISTS quiet_by TEXT",
+    "ALTER TABLE groups ADD COLUMN IF NOT EXISTS autonomy_level TEXT NOT NULL DEFAULT 'media'",
     "UPDATE groups SET spontaneous_chance = 0 WHERE spontaneous_chance <> 0",
     "ALTER TABLE users_balance ADD COLUMN IF NOT EXISTS last_work_at TIMESTAMPTZ",
     "ALTER TABLE assets ADD COLUMN IF NOT EXISTS description TEXT",
@@ -2105,3 +2126,250 @@ class Database:
                 """,
                 (data, last_seq),
             )
+
+    # ------------------------------------------------------------------
+    # Silenzio: "zitta" e' un diritto di tutti, non solo degli admin.
+    # ------------------------------------------------------------------
+
+    def set_quiet(self, chat_id: int, until: datetime, requested_by: str | None = None) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE groups SET quiet_until = %s, quiet_by = %s, updated_at = now() WHERE chat_id = %s",
+                (until, (requested_by or "")[:64], chat_id),
+            )
+
+    def clear_quiet(self, chat_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE groups SET quiet_until = NULL, quiet_by = NULL, updated_at = now() WHERE chat_id = %s",
+                (chat_id,),
+            )
+
+    def set_autonomy_level(self, chat_id: int, level: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE groups SET autonomy_level = %s, updated_at = now() WHERE chat_id = %s",
+                (level, chat_id),
+            )
+
+    # ------------------------------------------------------------------
+    # Apprendimento: cosa ha funzionato e cosa no.
+    # ------------------------------------------------------------------
+
+    def record_allys_reply(
+        self,
+        chat_id: int,
+        message_id: int,
+        prompt_text: str,
+        reply_text: str,
+        mode: str = "",
+        intent: str = "",
+        spontaneous: bool = False,
+    ) -> None:
+        """Archivia una risposta di Allys in attesa del giudizio del gruppo."""
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO reply_feedback
+                  (chat_id, message_id, prompt_text, reply_text, mode, intent, spontaneous)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (chat_id, message_id) DO NOTHING
+                """,
+                (chat_id, message_id, (prompt_text or "")[:500], (reply_text or "")[:1000], mode, intent, spontaneous),
+            )
+
+    def bump_reply_score(self, chat_id: int, message_id: int, delta: float, signal: str) -> float | None:
+        """Somma un voto (reaction, risposta, "zitta") a una risposta gia' data."""
+        if not delta:
+            return None
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                UPDATE reply_feedback
+                SET score = score + %s,
+                    signals = jsonb_set(
+                        signals,
+                        '{events}',
+                        COALESCE(signals->'events', '[]'::jsonb) || to_jsonb(%s::text),
+                        true
+                    )
+                WHERE chat_id = %s AND message_id = %s
+                RETURNING score
+                """,
+                (Decimal(str(round(delta, 4))), signal, chat_id, message_id),
+            ).fetchone()
+        return float(row["score"]) if row else None
+
+    def best_reply_examples(self, chat_id: int, limit: int = 3, days: int = 60) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT prompt_text, reply_text, score
+                FROM reply_feedback
+                WHERE chat_id = %s
+                  AND score > 0
+                  AND created_at > now() - make_interval(days => %s::int)
+                ORDER BY score DESC, created_at DESC
+                LIMIT %s
+                """,
+                (chat_id, days, limit * 3),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def reply_feedback_stats(self, chat_id: int, days: int = 21) -> dict[str, Any]:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) FILTER (WHERE score <> 0) AS samples,
+                       COALESCE(AVG(score) FILTER (WHERE score <> 0), 0) AS average,
+                       COUNT(*) AS total
+                FROM reply_feedback
+                WHERE chat_id = %s AND created_at > now() - make_interval(days => %s::int)
+                """,
+                (chat_id, days),
+            ).fetchone()
+        return {
+            "samples": int(row["samples"] or 0),
+            "average": float(row["average"] or 0.0),
+            "total": int(row["total"] or 0),
+        }
+
+    def spontaneous_today(self, chat_id: int) -> int:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM reply_feedback
+                WHERE chat_id = %s AND spontaneous AND created_at > now() - interval '24 hours'
+                """,
+                (chat_id,),
+            ).fetchone()
+        return int(row["count"] or 0)
+
+    def lexicon_messages(self, chat_id: int, limit: int = 400) -> list[dict[str, Any]]:
+        """Messaggi grezzi (autore + testo) da cui ricavare i tormentoni."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT COALESCE(username, CAST(user_id AS text)) AS username, text
+                FROM messages
+                WHERE chat_id = %s AND length(text) >= 4
+                ORDER BY id DESC
+                LIMIT %s
+                """,
+                (chat_id, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Autonomia: la chat e' viva? c'e' spazio per intromettersi?
+    # ------------------------------------------------------------------
+
+    def chat_activity(self, chat_id: int, window_hours: int = 6) -> dict[str, Any]:
+        with self.connect() as conn:
+            last_allys = conn.execute(
+                """
+                SELECT COALESCE(MAX(id), 0) AS id, MAX(created_at) AS at
+                FROM messages
+                WHERE chat_id = %s AND username = 'Allys'
+                """,
+                (chat_id,),
+            ).fetchone()
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS new_messages,
+                       COUNT(DISTINCT COALESCE(CAST(user_id AS text), username, 'anon')) AS unique_speakers,
+                       COALESCE(AVG(ABS(sentiment)), 0) AS energy,
+                       MAX(created_at) AS last_human_at,
+                       COALESCE(BOOL_OR(text LIKE '%%?%%'), false) AS pending_question
+                FROM messages
+                WHERE chat_id = %s
+                  AND username IS DISTINCT FROM 'Allys'
+                  AND id > %s
+                  AND created_at > now() - make_interval(hours => %s::int)
+                """,
+                (chat_id, int(last_allys["id"] or 0), window_hours),
+            ).fetchone()
+        now = datetime.now(UTC)
+        last_human_at = row["last_human_at"]
+        last_allys_at = last_allys["at"]
+        return {
+            "new_messages": int(row["new_messages"] or 0),
+            "unique_speakers": int(row["unique_speakers"] or 0),
+            "energy": float(row["energy"] or 0.0),
+            "pending_question": bool(row["pending_question"]),
+            "seconds_since_last_human": (now - last_human_at).total_seconds() if last_human_at else 10 ** 6,
+            "seconds_since_last_allys": (now - last_allys_at).total_seconds() if last_allys_at else 10 ** 6,
+        }
+
+    # ------------------------------------------------------------------
+    # Borsa in immagine: dati gia' pronti per il rendering.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _downsample(values: list[float], points: int) -> list[float]:
+        if points <= 0 or len(values) <= points:
+            return values
+        step = len(values) / points
+        return [values[min(len(values) - 1, int(index * step))] for index in range(points)] + [values[-1]]
+
+    def board_rows(self, chat_id: int, hours: int = 24, points: int = 28) -> list[dict[str, Any]]:
+        """Una riga per azienda quotata: prezzo, variazione nella finestra, serie."""
+        since = datetime.now(UTC) - timedelta(hours=hours)
+        rows: list[dict[str, Any]] = []
+        for asset in self.assets(chat_id, include_candidates=False):
+            ticks = self.price_history(chat_id, asset["symbol"], limit=400, since=since)
+            series = [float(tick["price"]) for tick in ticks]
+            price = float(asset["price"])
+            series.append(price)
+            reference = series[0]
+            change = (price - reference) / reference if reference else 0.0
+            rows.append(
+                {
+                    "symbol": asset["symbol"],
+                    "name": asset["name"],
+                    "price": price,
+                    "change_pct": round(change, 6),
+                    "history": self._downsample(series, points),
+                }
+            )
+        rows.sort(key=lambda item: abs(item["change_pct"]), reverse=True)
+        return rows
+
+    def asset_card(self, chat_id: int, symbol: str, hours: int = 48, points: int = 60) -> dict[str, Any] | None:
+        """Scheda completa di un titolo, pronta per ``charts.render_asset``."""
+        asset = self.asset(chat_id, symbol)
+        if not asset:
+            return None
+        since = datetime.now(UTC) - timedelta(hours=hours)
+        ticks = self.price_history(chat_id, asset["symbol"], limit=600, since=since)
+        series = [float(tick["price"]) for tick in ticks]
+        price = float(asset["price"])
+        series.append(price)
+        reference = series[0]
+        change = (price - reference) / reference if reference else 0.0
+        window = ticks[-8:]
+        stats = {
+            "mentions": sum(int(tick["mentions"] or 0) for tick in window),
+            "unique_users": max((int(tick["unique_users"] or 0) for tick in window), default=0),
+            "volume": float(asset.get("volume") or 0),
+            "manipulation_risk": float(asset.get("manipulation_risk") or 0),
+        }
+        return {
+            "asset": {
+                "symbol": asset["symbol"],
+                "name": asset["name"],
+                "price": price,
+                "change_pct": round(change, 6),
+                "status": asset.get("status"),
+            },
+            "history": self._downsample(series, points),
+            "stats": stats,
+        }
+
+    def market_movers(self, chat_id: int, hours: int = 3, limit: int = 3) -> list[dict[str, Any]]:
+        """I titoli che si sono mossi di piu' nella finestra recente."""
+        rows = self.board_rows(chat_id, hours=hours, points=8)
+        movers = [row for row in rows if abs(row["change_pct"]) > 0.001]
+        return movers[:limit]
+

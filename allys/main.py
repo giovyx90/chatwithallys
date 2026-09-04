@@ -17,7 +17,13 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, We
 from fastapi.responses import FileResponse, JSONResponse
 from redis.asyncio import Redis
 
-from allys.bot import PODCAST_TASKS, build_dispatcher, setup_router
+from allys.bot import (
+    PODCAST_TASKS,
+    build_dispatcher,
+    maybe_speak_spontaneously,
+    send_market_report,
+    setup_router,
+)
 from allys.config import get_settings
 from allys.db import Database
 from allys.market import MarketService
@@ -112,6 +118,9 @@ async def setup_telegram_commands() -> None:
         BotCommand(command="recap", description="Recap AI della chat"),
         BotCommand(command="mood", description="Umore del gruppo"),
         BotCommand(command="memoria", description="Gestione memoria"),
+        BotCommand(command="zitta", description="Falla tacere (tutti)"),
+        BotCommand(command="parla", description="Falla tornare (tutti)"),
+        BotCommand(command="autonomia", description="Quanto parla da sola"),
     ]
     admin_commands = group_commands + [
         BotCommand(command="allys_on", description="Riaccendi Allys"),
@@ -235,10 +244,74 @@ async def run_stock_candidate_generation() -> None:
             logger.exception("failed to propose stock candidates for chat_id=%s", chat_id)
 
 
+async def run_spontaneous_chatter() -> None:
+    """Ogni tanto guarda le chat vive e decide se intromettersi da sola."""
+    for chat_id in db.active_group_ids():
+        # Solo gruppi e canali: un bot che scrive per primo in DM e' molesto.
+        if chat_id > 0:
+            continue
+        try:
+            await maybe_speak_spontaneously(bot, chat_id)
+        except Exception:
+            logger.exception("failed spontaneous chatter for chat_id=%s", chat_id)
+
+
+async def run_market_reports() -> None:
+    """Una volta al giorno manda la chiusura della borsa, come immagine."""
+    if not settings.feature_market:
+        return
+    now = __import__("datetime").datetime.now(ZoneInfo(settings.podcast_timezone))
+    if now.strftime("%H:%M") != settings.market_report_time:
+        return
+    day = now.date().isoformat()
+    for chat_id in db.active_group_ids():
+        key = f"market_report:{chat_id}:{day}"
+        if db.app_state_get(key):
+            continue
+        db.app_state_set(key, "done")
+        try:
+            await send_market_report(bot, chat_id)
+        except Exception:
+            logger.exception("failed market report for chat_id=%s", chat_id)
+
+
+async def ensure_webhook() -> None:
+    """Registra il webhook chiedendo anche le reaction.
+
+    Senza ``message_reaction`` fra gli allowed_updates Telegram non ce le manda
+    proprio, e Allys perderebbe il segnale piu' onesto che ha per capire se una
+    risposta e' piaciuta.
+    """
+    if not settings.telegram_auto_webhook:
+        return
+    url = f"{settings.public_base_url}/telegram/webhook"
+    try:
+        await bot.set_webhook(
+            url,
+            secret_token=settings.telegram_webhook_secret,
+            allowed_updates=[
+                "message",
+                "edited_message",
+                "channel_post",
+                "edited_channel_post",
+                "callback_query",
+                "message_reaction",
+                "poll",
+                "poll_answer",
+                "my_chat_member",
+                "chat_member",
+            ],
+        )
+        logger.info("webhook registrato su %s con le reaction abilitate", url)
+    except Exception:
+        logger.exception("non sono riuscito a registrare il webhook su %s", url)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     db.init()
     await setup_telegram_commands()
+    await ensure_webhook()
     if settings.feature_place:
         await place.ensure_ready()
         scheduler.add_job(place.save_snapshot, "interval", minutes=5, id="place-snapshot", max_instances=1)
@@ -249,6 +322,9 @@ async def lifespan(_: FastAPI):
     if settings.feature_market:
         scheduler.add_job(run_stock_windows, "interval", minutes=1, id="stock-windows", max_instances=1)
         scheduler.add_job(run_stock_candidate_generation, "interval", minutes=1, id="stock-candidates", max_instances=1)
+    scheduler.add_job(run_spontaneous_chatter, "interval", minutes=4, id="spontaneous-chatter", max_instances=1)
+    if settings.feature_market:
+        scheduler.add_job(run_market_reports, "interval", minutes=1, id="market-reports", max_instances=1)
     scheduler.start()
     yield
     scheduler.shutdown(wait=False)

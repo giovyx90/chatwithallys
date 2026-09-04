@@ -40,8 +40,83 @@ messaggi comuni dei gruppi.
 - `/meme_test testo` prova la ricerca meme senza chiamare l'AI.
 - `/predictions` apre il bot Predictions separato con sessione del gruppo.
 
-Allys non interviene spontaneamente: risponde solo quando un messaggio contiene
-`Allys` o quando qualcuno fa reply a un suo messaggio.
+## Farla tacere: lo puo' fare chiunque
+
+Non serve essere admin. Questi comandi valgono per tutti i membri:
+
+- `/zitta` (o `/zitto`, `/silenzio`, `/muta`) la mette in silenzio 30 minuti.
+- `/zitta 2h` sceglie la durata (`30m`, `2h`, `1d`, massimo 7 giorni).
+- `/parla` la riaccende subito.
+- Funziona anche a parole: "Allys stai zitta" o un reply con "smettila" hanno lo
+  stesso effetto del comando.
+
+Il silenzio chiesto dai membri e' distinto da `/allys_off` e `/allys_pause` degli
+admin: `/parla` toglie il primo, non spegne il secondo. E ogni "zitta" vale anche
+come voto negativo sull'ultima cosa che ha detto (vedi sotto).
+
+## Come impara dal gruppo
+
+Il modello locale non viene riaddestrato: quello che cambia e' cosa gli mettiamo
+davanti a ogni risposta. Allys raccoglie i voti che il gruppo le da' senza
+accorgersene e li usa per costruirsi lo stile.
+
+- **Reaction**: un 😂 o un 🔥 su una sua risposta valgono positivo, un 💩 o un
+  🥱 negativo. Telegram manda le reaction ai bot **solo se il bot e' admin del
+  gruppo** e solo con `message_reaction` fra gli `allowed_updates` (viene
+  registrato da solo all'avvio, vedi `TELEGRAM_AUTO_WEBHOOK`). Se Allys non e'
+  admin non si rompe niente: resta il segnale delle risposte, che funziona
+  sempre.
+- **Risposte**: se qualcuno replica a un suo messaggio e' gia' un segnale
+  positivo, pesato con il sentiment della replica. "Stai zitta" lo ribalta.
+- **Esempi di stile**: le risposte con punteggio piu' alto tornano nel prompt
+  come esempi few-shot. Allys imita il taglio di quello che in *quel* gruppo ha
+  gia' funzionato, non un tono generico.
+- **Lessico**: i tormentoni ricorrenti (parole e coppie di parole usate da almeno
+  due persone diverse) finiscono nel prompt. Chi spamma la stessa parola da solo
+  non conta.
+- **Taratura**: se il gradimento medio scende, Allys accorcia le risposte e vira
+  sull'utile; se sale, si allunga un po'. `/autonomia` senza argomenti mostra il
+  gradimento corrente.
+
+## Parlare da sola
+
+Ogni 4 minuti Allys guarda le chat vive e decide se intromettersi. Perche' parli
+servono *tutte* queste condizioni: la conversazione e' attiva (ultimo messaggio
+umano entro 8 minuti), lei tace da abbastanza, ci sono abbastanza messaggi nuovi
+dall'ultima volta, la quota giornaliera non e' finita e non e' stata zittita.
+
+`/autonomia off|bassa|media|alta` (solo admin) regola la soglia:
+
+| livello | pausa minima | max al giorno | messaggi nuovi richiesti |
+|---------|--------------|---------------|--------------------------|
+| off     | -            | 0             | -                        |
+| bassa   | 3 ore        | 2             | 40                       |
+| media   | 75 minuti    | 5             | 18                       |
+| alta    | 35 minuti    | 10            | 10                       |
+
+Il default e' `media`. Se in quel momento la borsa si e' mossa parecchio, il suo
+intervento diventa un commento di borsa con l'immagine del listino allegata.
+
+## Borsa: immagini, non mini app
+
+I prezzi si vedono scorrendo la chat, senza aprire niente:
+
+- `/borsa` nel gruppo manda il listino come PNG (una riga per azienda con
+  sparkline, prezzo e variazione 24h). La mini app resta come pulsante per chi la
+  vuole.
+- `/prezzo SYMBOL` manda la scheda del titolo: prezzo grande, grafico del
+  periodo, menzioni, persone coinvolte, volume e rischio spam.
+- `/portfolio` manda la card delle posizioni con liquidita', valore e PnL.
+- `/compra` e `/vendi` rispondono con la scheda aggiornata del titolo mosso.
+- Ogni sera a `MARKET_REPORT_TIME` (default 21:00) arriva la chiusura di
+  giornata: listino illustrato piu' una riga di commento scritta da Allys.
+
+Le immagini sono generate con Pillow dentro al container (nessuna GPU, nessun
+browser headless) e disegnate a 2x per avere i bordi lisci. Servono i font
+DejaVu, gia' inclusi nel `Dockerfile` (`fonts-dejavu-core`).
+
+Allys risponde quando un messaggio contiene `Allys`, quando qualcuno fa reply a
+un suo messaggio e, ogni tanto, di sua iniziativa (vedi "Parlare da sola").
 Quando risponde tiene conto del filo della conversazione (gli ultimi messaggi,
 anonimizzati) e dell'umore del gruppo, e adatta il tono: piu utile e calorosa se
 l'aria e tesa, piu pungente se il gruppo e su di giri. La scelta roast/utile non
