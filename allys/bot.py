@@ -307,7 +307,24 @@ async def allys_help(message: Message) -> None:
 @router.channel_post(Command("allys_status"))
 async def allys_status(message: Message) -> None:
     group = await ensure_context(message)
-    await message.answer(f"Stato Allys: {quiet_status(group) or 'attiva'}. Rispondo solo se scrivi Allys o fai reply a un mio messaggio.")
+    await message.answer(
+        f"Stato Allys: {quiet_status(group) or 'attiva'}. "
+        f"Cervello: {await brain_label()}. "
+        "Rispondo solo se scrivi Allys o fai reply a un mio messaggio."
+    )
+
+
+async def brain_label() -> str:
+    """Human-readable line about which Ollama is answering right now."""
+    try:
+        status = await services.ollama.status()
+    except Exception:
+        return "non lo so"
+    if not status["gpu_configured"]:
+        return f"{status['model']} sulla VPS"
+    if status["gpu_up"]:
+        return f"{status['model']} sulla GPU di Giovyx"
+    return f"{status['model']} sulla VPS (GPU spenta)"
 
 
 @router.message(Command("allys_off"))

@@ -162,6 +162,64 @@ l'ultima richiesta. Ogni chat/canale puo ricevere massimo un podcast al giorno.
 Il podcast usa una voce femminile italiana e uno stile parlato tipo mini-TG,
 senza markdown, asterischi o indicazioni di scena.
 
+## Due cervelli: VPS sempre acceso, GPU quando c'e'
+
+La VPS non ha GPU: sei vCPU e circa 6 GB di RAM libera, quindi `qwen3:8b` gira
+ma risponde in decine di secondi. Il PC di Giovyx ha una RTX 5050 da 8 GB, dove
+lo stesso modello va una decina di volte piu' veloce.
+
+Allys usa la GPU quando la trova e la VPS quando non c'e', senza che nessuno nel
+gruppo debba fare niente. Il default resta la VPS: se il PC e' spento non cambia
+nulla, solo la velocita'.
+
+| Variabile | Cosa fa |
+| --- | --- |
+| `OLLAMA_GPU_BASE_URL` | Dove sta la GPU. Vuoto = solo VPS. |
+| `OLLAMA_GPU_CHAT_MODEL` | Modello da usare sulla GPU (di solito piu' grosso). |
+| `OLLAMA_GPU_PROBE_SECONDS` | Ogni quanto ricontrolla se il PC e' acceso (30s). |
+| `OLLAMA_GPU_PREDICT_SCALE` | Quanto puo' allungarsi la risposta sulla GPU (1.6x). |
+
+Gli embedding restano **sempre** sulla VPS: cambiare backend a meta' strada
+significherebbe due spazi vettoriali diversi dentro la stessa collezione Qdrant.
+
+`/allys_status` dice quale cervello sta rispondendo in quel momento.
+
+### Collegare il PC
+
+Sulla VPS, una riga in `/etc/ssh/sshd_config` (poi `systemctl reload ssh`):
+
+```
+GatewayPorts clientspecified
+```
+
+Nel `.env`:
+
+```
+OLLAMA_GPU_BASE_URL=http://172.17.0.1:11435
+```
+
+Sul PC:
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull qwen3:8b
+cp scripts/gpu-tunnel.sh ~/.local/share/allys/gpu-tunnel.sh
+cp scripts/allys-gpu-tunnel.service ~/.config/systemd/user/
+systemctl --user enable --now allys-gpu-tunnel
+loginctl enable-linger $USER
+```
+
+Il tunnel si appoggia alla `docker0` della VPS (172.17.0.1), quindi la porta e'
+raggiungibile dai container ma non da internet. Quando il PC si spegne la porta
+sparisce, la sonda fallisce in pochi millisecondi e Allys torna sulla VPS.
+
+### Consiglio sul modello della VPS
+
+Con la GPU collegata conviene alleggerire il fallback: `OLLAMA_CHAT_MODEL=qwen3:4b`
+occupa 2.6 GB invece di 5.2 e risponde in circa meta' tempo. La qualita' cala
+poco per quattro battute in un gruppo di amici, e la VPS smette di grattare lo
+swap mentre gira tutto il resto.
+
 ## Predictions separato
 
 `/predictions` non usa piu l'Arcade vecchio di Allys: apre
