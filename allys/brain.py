@@ -5,7 +5,7 @@ Qui vivono le funzioni *pure* che rendono Allys piu sveglia e adattiva:
 - leggere l'umore recente del gruppo;
 - scegliere il tono (utile vs roast) in modo furbo e adattivo per gruppo;
 - costruire una persona coerente e un system prompt ricco;
-- trasformare gli ultimi messaggi in una trascrizione anonimizzata, cosi Allys
+- trasformare gli ultimi messaggi in una trascrizione, cosi Allys
   vede il *filo* della conversazione e non solo tre frammenti di memoria.
 
 Tutto qui e sincrono e senza I/O: cosi e testabile e ``bot.py`` resta snello.
@@ -130,15 +130,26 @@ def build_system_prompt(
     minigame_context: str = "",
     style_block: str = "",
     spontaneous: bool = False,
+    anonymize: bool = False,
 ) -> str:
     """System prompt ricco e coerente."""
     guardrails = (
         "Rispondi SEMPRE in italiano, breve (1-3 frasi), come in una chat tra amici. "
         "Niente markdown, niente asterischi, niente elenchi puntati. "
         "Non fare doxxing, incitamento all'odio, minacce o attacchi personali gravi. "
-        "Non citare nomi propri, username o dati personali del gruppo: se ti riferisci a "
-        "qualcuno usa solo '@/'. Non inventare fatti sulle persone."
     )
+    if anonymize:
+        guardrails += (
+            "Non citare nomi propri, username o dati personali del gruppo: se ti riferisci a "
+            "qualcuno usa solo '@/'. Non inventare fatti sulle persone."
+        )
+    else:
+        guardrails += (
+            "Qui vi conoscete tutti: chiama le persone per nome come farebbe un amico, "
+            "e rivolgiti direttamente a chi ti ha scritto. Non inventare fatti sulle persone "
+            "e non tirare fuori dati privati (numeri, indirizzi, lavoro, relazioni) nemmeno "
+            "se te li sei letti nella conversazione."
+        )
     style = persona_line(roast_level, mood_label)
     if mode == "roast":
         mode_line = (
@@ -172,10 +183,13 @@ def build_system_prompt(
     return prompt
 
 
-def speaker_aliases(messages: list[dict[str, Any]]) -> dict[str, str]:
-    """Mappa ogni interlocutore a un alias anonimo stabile (utente A, B, ...).
+def speaker_aliases(messages: list[dict[str, Any]], anonymize: bool = False) -> dict[str, str]:
+    """Mappa ogni interlocutore all'etichetta con cui il modello lo vedra'.
 
-    Cosi il modello puo seguire *chi dice cosa* senza mai vedere nomi reali.
+    Di default usa i nomi veri: in una chat tra amici "utente A" toglie il senso
+    alla battuta, perche' Allys non puo' prendere in giro qualcuno che non sa chi
+    e'. Con ``anonymize=True`` torna agli alias stabili (utente A, B, ...) per
+    chi la mette in un gruppo dove non si conoscono tutti.
     """
     aliases: dict[str, str] = {}
     human_index = 0
@@ -185,16 +199,30 @@ def speaker_aliases(messages: list[dict[str, Any]]) -> dict[str, str]:
             continue
         if key == "allys":
             aliases[key] = BOT_AUTHOR
-        else:
-            aliases[key] = f"utente {chr(65 + (human_index % 26))}"
-            human_index += 1
+            continue
+        fallback = f"utente {chr(65 + (human_index % 26))}"
+        aliases[key] = fallback if anonymize else (_real_name(row) or fallback)
+        human_index += 1
     return aliases
+
+
+def _real_name(row: dict[str, Any]) -> str:
+    """Come lo chiamano gli amici: nome Telegram, altrimenti @username."""
+    for field in ("display_name", "username"):
+        value = row.get(field)
+        if value and str(value).strip():
+            return str(value).strip()
+    return ""
 
 
 def _speaker_key(row: dict[str, Any]) -> str:
     username = row.get("username")
     if username is not None and str(username).lower() == BOT_AUTHOR.lower():
         return "allys"
+    # Due amici possono chiamarsi uguale: l'id Telegram e' l'unica chiave sicura.
+    user_id = row.get("user_id")
+    if user_id is not None:
+        return f"id:{user_id}"
     if username:
         return f"u:{str(username).lower()}"
     return "anon"
@@ -204,16 +232,17 @@ def format_transcript(
     messages: list[dict[str, Any]],
     aliases: dict[str, str] | None = None,
     limit: int = HISTORY_TURNS,
+    anonymize: bool = False,
 ) -> str:
-    """Trascrizione anonimizzata degli ultimi messaggi, in ordine cronologico."""
+    """Gli ultimi messaggi come dialogo, in ordine cronologico."""
     window = messages[-limit:] if limit else messages
     if not window:
         return ""
-    resolved = aliases or speaker_aliases(window)
+    resolved = aliases or speaker_aliases(window, anonymize=anonymize)
     lines: list[str] = []
     for row in window:
         alias = resolved.get(_speaker_key(row), "utente")
-        text = sanitize(row.get("text") or "").strip()
+        text = sanitize(row.get("text") or "", anonymize=anonymize).strip()
         if not text:
             continue
         lines.append(f"{alias}: {text[:280]}")
@@ -223,8 +252,10 @@ def format_transcript(
 _MENTION_RE = re.compile(r"@[A-Za-z0-9_]{2,32}")
 
 
-def sanitize(text: str) -> str:
-    """Sostituisce le menzioni @username con @/ (guardrail privacy)."""
+def sanitize(text: str, anonymize: bool = False) -> str:
+    """Con ``anonymize`` sostituisce le menzioni @username con @/."""
+    if not anonymize:
+        return text or ""
     return _MENTION_RE.sub("@/", text or "")
 
 

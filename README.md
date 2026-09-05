@@ -118,11 +118,27 @@ DejaVu, gia' inclusi nel `Dockerfile` (`fonts-dejavu-core`).
 Allys risponde quando un messaggio contiene `Allys`, quando qualcuno fa reply a
 un suo messaggio e, ogni tanto, di sua iniziativa (vedi "Parlare da sola").
 Quando risponde tiene conto del filo della conversazione (gli ultimi messaggi,
-anonimizzati) e dell'umore del gruppo, e adatta il tono: piu utile e calorosa se
-l'aria e tesa, piu pungente se il gruppo e su di giri. La scelta roast/utile non
-e piu casuale ma dipende dall'intento del messaggio (domande e richieste di aiuto
-ottengono sempre una risposta concreta) e dal `roast_level` del gruppo.
-Le risposte AI sono tenute brevi e gli `@username` vengono sostituiti con `@/`.
+con i nomi di chi parla) e dell'umore del gruppo, e adatta il tono: piu utile e
+calorosa se l'aria e tesa, piu pungente se il gruppo e su di giri. La scelta
+roast/utile non e piu casuale ma dipende dall'intento del messaggio (domande e
+richieste di aiuto ottengono sempre una risposta concreta) e dal `roast_level`
+del gruppo. Le risposte AI sono tenute brevi.
+
+### Nomi veri, non "utente A"
+
+Il modello vede i nomi Telegram di chi parla, e si rivolge alle persone per nome.
+E' il default perche' in una chat tra amici l'anonimato costa ogni battuta che
+abbia bisogno di sapere *chi* ha detto una cosa. I nomi arrivano da `group_users`,
+quindi funzionano anche sui messaggi gia' archiviati; chi non ha un nome Telegram
+compare con lo `@username`, e chi non ha nemmeno quello resta "utente A".
+
+Restano fermi i guardrail che contano: niente fatti inventati sulle persone,
+niente dati privati (numeri, indirizzi, lavoro, relazioni) anche se sono passati
+in chat, niente attacchi personali gravi.
+
+Con `ANONYMIZE_SPEAKERS=true` si torna agli alias "utente A/B/C" e gli
+`@username` vengono sostituiti con `@/`: serve se metti Allys in un gruppo grosso
+dove non si conoscono tutti.
 Se in un thread appena avviato con Allys arriva un follow-up (una domanda), puo
 intervenire anche senza essere chiamata per nome, con finestra e cooldown
 anti-spam. Ricorda anche le proprie risposte, quindi la conversazione le "torna"
@@ -213,12 +229,20 @@ Il tunnel si appoggia alla `docker0` della VPS (172.17.0.1), quindi la porta e'
 raggiungibile dai container ma non da internet. Quando il PC si spegne la porta
 sparisce, la sonda fallisce in pochi millisecondi e Allys torna sulla VPS.
 
-### Consiglio sul modello della VPS
+### Il modello della VPS va tenuto piccolo
 
-Con la GPU collegata conviene alleggerire il fallback: `OLLAMA_CHAT_MODEL=qwen3:4b`
-occupa 2.6 GB invece di 5.2 e risponde in circa meta' tempo. La qualita' cala
-poco per quattro battute in un gruppo di amici, e la VPS smette di grattare lo
-swap mentre gira tutto il resto.
+Non e' un consiglio estetico. La VPS ha circa 6 GB di RAM libera e sopra ci
+girano server di gioco, database e una quindicina di siti: caricare `qwen3:8b`
+(5.2 GB) porta la macchina a grattare swap finche' *nessun* processo userspace
+risponde piu', sshd compreso. La macchina resta pingabile e accetta le
+connessioni TCP, ma non risponde a niente.
+
+Quindi con la GPU collegata: `OLLAMA_CHAT_MODEL=qwen3:4b`, che occupa 2.6 GB e
+risponde in circa meta' tempo. La qualita' cala poco per quattro battute in un
+gruppo di amici, e quando il PC e' acceso il modello grosso ce l'hai comunque.
+
+Il servizio `ollama` ha anche un `mem_limit: 5g` nel compose: se qualcuno prova a
+caricare un modello troppo grosso muore il container, non la VPS.
 
 ## Predictions separato
 

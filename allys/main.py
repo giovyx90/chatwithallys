@@ -70,6 +70,7 @@ dispatcher = build_dispatcher(
         settings.giphy_api_key,
         settings.tenor_api_key,
         settings.meme_reddit_fallback,
+        settings.anonymize_speakers,
     )
 )
 scheduler = AsyncIOScheduler(timezone=settings.podcast_timezone)

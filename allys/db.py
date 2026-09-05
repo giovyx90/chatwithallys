@@ -795,10 +795,13 @@ class Database:
         with self.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT username, text, sentiment, created_at
-                FROM messages
-                WHERE chat_id = %s
-                ORDER BY id DESC
+                SELECT m.user_id, m.username, m.text, m.sentiment, m.created_at,
+                       g.display_name
+                FROM messages AS m
+                LEFT JOIN group_users AS g
+                  ON g.chat_id = m.chat_id AND g.user_id = m.user_id
+                WHERE m.chat_id = %s
+                ORDER BY m.id DESC
                 LIMIT %s
                 """,
                 (chat_id, limit),

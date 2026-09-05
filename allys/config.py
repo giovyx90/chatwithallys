@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     ollama_gpu_chat_model: str = Field("", alias="OLLAMA_GPU_CHAT_MODEL")
     ollama_gpu_probe_seconds: int = Field(30, alias="OLLAMA_GPU_PROBE_SECONDS")
     ollama_gpu_predict_scale: float = Field(1.6, alias="OLLAMA_GPU_PREDICT_SCALE")
+    anonymize_speakers: bool = Field(False, alias="ANONYMIZE_SPEAKERS")
     podcast_timezone: str = Field("Europe/Rome", alias="PODCAST_TIMEZONE")
     predictions_base_url: str = Field("https://predictions.giovyx-server.it", alias="PREDICTIONS_BASE_URL")
     predictions_session_secret: str = Field("", alias="PREDICTIONS_SESSION_SECRET")
