@@ -15,7 +15,7 @@ REMOTE_PORT="${ALLYS_TUNNEL_PORT:-11435}"
 LOCAL_OLLAMA="${ALLYS_LOCAL_OLLAMA:-127.0.0.1:11434}"
 
 if ! curl -fsS --max-time 3 "http://${LOCAL_OLLAMA}/api/tags" >/dev/null; then
-  echo "Ollama non risponde su ${LOCAL_OLLAMA}. Avvialo con: systemctl --user start ollama" >&2
+  echo "Ollama non risponde su ${LOCAL_OLLAMA}. Avvialo con: sudo systemctl start ollama" >&2
   exit 1
 fi
 
