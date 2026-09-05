@@ -20,6 +20,9 @@ services:
       - "${BOT_API_BIND:-127.0.0.1}:${BOT_API_PORT:-8000}:8000"
     volumes:
       - podcast_data:/app/data/podcasts
+    extra_hosts:
+      # lets OLLAMA_GPU_BASE_URL point at the reverse tunnel opened on the host
+      - "host.docker.internal:host-gateway"
     networks:
       - allys
 
@@ -51,6 +54,10 @@ services:
   qdrant:
     image: qdrant/qdrant:v1.11.3
     restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     volumes:
       - qdrant_data:/qdrant/storage
     networks:

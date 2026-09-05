@@ -1,0 +1,17 @@
+# User service for the GPU box: install with
+#   cp scripts/allys-gpu-tunnel.service ~/.config/systemd/user/
+#   systemctl --user enable --now allys-gpu-tunnel
+# Needs "loginctl enable-linger $USER" to survive logout.
+[Unit]
+Description=Lend this machine's GPU to Allys
+After=network-online.target ollama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/allys/gpu-tunnel.sh
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target
