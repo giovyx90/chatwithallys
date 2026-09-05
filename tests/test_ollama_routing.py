@@ -16,6 +16,7 @@ class FakeSettings:
     ollama_gpu_chat_model = "qwen3:8b"
     ollama_gpu_probe_seconds = 30
     ollama_gpu_predict_scale = 2.0
+    ollama_timeout_seconds = 90.0
 
 
 class FakeResponse:

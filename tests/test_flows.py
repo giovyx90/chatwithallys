@@ -9,6 +9,7 @@ l'autonomia si ferma quando deve.
 
 from __future__ import annotations
 
+import asyncio
 import types
 from datetime import UTC, datetime, timedelta
 
@@ -236,3 +237,40 @@ async def test_chiusura_di_borsa(wired) -> None:
     assert await bot_module.send_market_report(wired.bot, -100) is True
     kind, size, caption = wired.bot.sent[-1]
     assert kind == "photo" and size > 5_000 and caption
+
+
+def test_una_scusa_sola_quando_il_cervello_e_giu() -> None:
+    """Con Ollama in timeout falliva ogni messaggio, e ogni fallimento era una
+    scusa in chat: in un canale attivo diventa spam peggiore del silenzio."""
+    bot_module._BRAIN_ERROR_NOTIFIED.clear()
+    messaggi = [FakeMessage("allys ci sei?") for _ in range(5)]
+    for msg in messaggi:
+        asyncio.run(bot_module.notify_brain_error(msg))
+    inviati = [m for m in messaggi if m.sent]
+    assert len(inviati) == 1
+    assert "pausa" in inviati[0].sent[0][1]
+
+
+def test_la_scusa_torna_dopo_che_il_cervello_si_e_ripreso() -> None:
+    bot_module._BRAIN_ERROR_NOTIFIED.clear()
+    primo = FakeMessage("allys ci sei?")
+    asyncio.run(bot_module.notify_brain_error(primo))
+    assert primo.sent
+
+    zittita = FakeMessage("allys ci sei?")
+    asyncio.run(bot_module.notify_brain_error(zittita))
+    assert not zittita.sent
+
+    bot_module.clear_brain_error(zittita.chat.id)
+    dopo_ripresa = FakeMessage("allys ci sei?")
+    asyncio.run(bot_module.notify_brain_error(dopo_ripresa))
+    assert dopo_ripresa.sent
+
+
+def test_chat_diverse_ricevono_ognuna_la_sua_scusa() -> None:
+    bot_module._BRAIN_ERROR_NOTIFIED.clear()
+    gruppo = FakeMessage("allys?", chat_id=-100)
+    canale = FakeMessage("allys?", chat_id=-200)
+    asyncio.run(bot_module.notify_brain_error(gruppo))
+    asyncio.run(bot_module.notify_brain_error(canale))
+    assert gruppo.sent and canale.sent

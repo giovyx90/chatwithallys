@@ -259,6 +259,29 @@ def _local_brain_error_text() -> str:
     return "Il cervello locale sta facendo una pausa: riprovo tra poco."
 
 
+# Quando il modello e' giu' fallisce *ogni* messaggio, e scusarsi ogni volta e'
+# spam peggiore del silenzio. Una scusa per chat, poi zitta finche' non passa.
+_BRAIN_ERROR_COOLDOWN = 600.0
+_BRAIN_ERROR_NOTIFIED: dict[int, float] = {}
+
+
+async def notify_brain_error(message: Message) -> None:
+    chat_id = message.chat.id
+    now = time.monotonic()
+    if now - _BRAIN_ERROR_NOTIFIED.get(chat_id, 0.0) < _BRAIN_ERROR_COOLDOWN:
+        return
+    _BRAIN_ERROR_NOTIFIED[chat_id] = now
+    try:
+        await message.answer(_local_brain_error_text())
+    except Exception:
+        logger.info("could not deliver the brain-error notice to chat_id=%s", chat_id)
+
+
+def clear_brain_error(chat_id: int) -> None:
+    """Il cervello e' tornato: la prossima caduta merita di nuovo una scusa."""
+    _BRAIN_ERROR_NOTIFIED.pop(chat_id, None)
+
+
 def _match_group_reference(
     groups: list[dict[str, Any]],
     request: str,
@@ -1154,9 +1177,10 @@ async def media_message(message: Message, bot: Bot) -> None:
             try:
                 reply, meta = await build_reply(message, group)
                 await send_allys_reply(message, group, reply, meta)
+                clear_brain_error(message.chat.id)
             except Exception:
                 logger.exception("failed to build media AI reply for chat_id=%s", message.chat.id)
-                await message.answer(_local_brain_error_text())
+                await notify_brain_error(message)
 
 
 @router.message(F.text)
@@ -1177,10 +1201,11 @@ async def group_text(message: Message, bot: Bot) -> None:
         try:
             reply, meta = await build_reply(message, group)
             await send_allys_reply(message, group, reply, meta)
+            clear_brain_error(message.chat.id)
             replied = True
         except Exception:
             logger.exception("failed to build AI reply for chat_id=%s", message.chat.id)
-            await message.answer(_local_brain_error_text())
+            await notify_brain_error(message)
     if not replied:
         await maybe_react(message, bot, group, sentiment)
     if message.from_user:
@@ -1203,9 +1228,10 @@ async def channel_text(message: Message, bot: Bot) -> None:
         try:
             reply, meta = await build_reply(message, group)
             await send_allys_reply(message, group, reply, meta)
+            clear_brain_error(message.chat.id)
         except Exception:
             logger.exception("failed to build channel AI reply for chat_id=%s", message.chat.id)
-            await message.answer(_local_brain_error_text())
+            await notify_brain_error(message)
 
 
 async def ensure_context(message: Message) -> dict[str, Any]:

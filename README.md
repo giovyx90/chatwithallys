@@ -229,6 +229,17 @@ Il tunnel si appoggia alla `docker0` della VPS (172.17.0.1), quindi la porta e'
 raggiungibile dai container ma non da internet. Quando il PC si spegne la porta
 sparisce, la sonda fallisce in pochi millisecondi e Allys torna sulla VPS.
 
+### Quando il cervello e' giu'
+
+Se Ollama non risponde, Allys manda **una** scusa per chat e poi tace, e la
+rimanda solo dopo che e' tornata a rispondere davvero. Scusarsi a ogni messaggio
+in un canale attivo e' spam peggiore del silenzio, ed e' esattamente quello che
+succedeva quando la VPS andava in timeout.
+
+`OLLAMA_TIMEOUT_SECONDS` (90 di default) taglia le richieste che non arriveranno
+mai: una risposta dopo tre minuti non serve a nessuno e nel frattempo le
+richieste si accumulano.
+
 ### Il modello della VPS va tenuto piccolo
 
 Non e' un consiglio estetico. La VPS ha circa 6 GB di RAM libera e sopra ci

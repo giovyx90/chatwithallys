@@ -45,6 +45,9 @@ class OllamaClient:
                 predict_scale=settings.ollama_gpu_predict_scale,
             )
         self.embed_model = settings.ollama_embed_model
+        # Una risposta che arriva dopo tre minuti non serve a nessuno, e nel
+        # frattempo le richieste si accumulano su una macchina gia' in ginocchio.
+        self._chat_timeout = max(10.0, settings.ollama_timeout_seconds)
         self._probe_seconds = max(5, settings.ollama_gpu_probe_seconds)
         self._probe_timeout = 2.0
         self._gpu_up = False
@@ -119,7 +122,7 @@ class OllamaClient:
         num_predict: int,
         temperature: float,
     ) -> str:
-        async with httpx.AsyncClient(timeout=180) as client:
+        async with httpx.AsyncClient(timeout=self._chat_timeout) as client:
             response = await client.post(
                 f"{backend.base_url}/api/chat",
                 json={
