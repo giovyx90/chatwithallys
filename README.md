@@ -229,12 +229,20 @@ Il tunnel si appoggia alla `docker0` della VPS (172.17.0.1), quindi la porta e'
 raggiungibile dai container ma non da internet. Quando il PC si spegne la porta
 sparisce, la sonda fallisce in pochi millisecondi e Allys torna sulla VPS.
 
-### Consiglio sul modello della VPS
+### Il modello della VPS va tenuto piccolo
 
-Con la GPU collegata conviene alleggerire il fallback: `OLLAMA_CHAT_MODEL=qwen3:4b`
-occupa 2.6 GB invece di 5.2 e risponde in circa meta' tempo. La qualita' cala
-poco per quattro battute in un gruppo di amici, e la VPS smette di grattare lo
-swap mentre gira tutto il resto.
+Non e' un consiglio estetico. La VPS ha circa 6 GB di RAM libera e sopra ci
+girano server di gioco, database e una quindicina di siti: caricare `qwen3:8b`
+(5.2 GB) porta la macchina a grattare swap finche' *nessun* processo userspace
+risponde piu', sshd compreso. La macchina resta pingabile e accetta le
+connessioni TCP, ma non risponde a niente.
+
+Quindi con la GPU collegata: `OLLAMA_CHAT_MODEL=qwen3:4b`, che occupa 2.6 GB e
+risponde in circa meta' tempo. La qualita' cala poco per quattro battute in un
+gruppo di amici, e quando il PC e' acceso il modello grosso ce l'hai comunque.
+
+Il servizio `ollama` ha anche un `mem_limit: 5g` nel compose: se qualcuno prova a
+caricare un modello troppo grosso muore il container, non la VPS.
 
 ## Predictions separato
 

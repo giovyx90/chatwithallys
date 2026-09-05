@@ -66,11 +66,17 @@ services:
   ollama:
     image: ollama/ollama:latest
     restart: unless-stopped
+    # The VPS has ~6 GB of free RAM and the rest of the box (game servers,
+    # databases, ~15 sites) has to keep running. Without a cap, loading a large
+    # model starves userspace until even sshd stops answering. Better that
+    # ollama alone dies than the whole machine.
+    mem_limit: 5g
     volumes:
       - ollama_data:/root/.ollama
     environment:
       OLLAMA_HOST: 0.0.0.0:11434
       OLLAMA_KEEP_ALIVE: 30m
+      OLLAMA_MAX_LOADED_MODELS: 1
     networks:
       - allys
 
