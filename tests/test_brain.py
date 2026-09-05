@@ -56,25 +56,51 @@ def test_group_mood_reads_sentiment() -> None:
     assert group_mood([])["label"] == "silenzio"
 
 
-def test_transcript_is_anonymized() -> None:
+def test_transcript_uses_real_names() -> None:
+    """Tra amici il nome serve: senza, Allys non puo' prendere in giro nessuno."""
     messages = [
-        {"username": "mario", "text": "ciao a tutti @luigi"},
-        {"username": "anna", "text": "che si dice?"},
-        {"username": "mario", "text": "niente di che"},
+        {"user_id": 1, "username": "mario99", "display_name": "Mario", "text": "ciao a tutti @luigi"},
+        {"user_id": 2, "username": "anna", "display_name": "Anna", "text": "che si dice?"},
+        {"user_id": 1, "username": "mario99", "display_name": "Mario", "text": "niente di che"},
     ]
-    aliases = speaker_aliases(messages)
-    transcript = format_transcript(messages, aliases)
-    assert "mario" not in transcript
+    transcript = format_transcript(messages, speaker_aliases(messages))
+    assert transcript.count("Mario:") == 2
+    assert "Anna:" in transcript
+    assert "@luigi" in transcript
+    assert "utente A" not in transcript
+
+
+def test_transcript_ripiega_sullo_username_senza_nome() -> None:
+    messages = [{"user_id": 7, "username": "giovyx90", "text": "presente"}]
+    assert "giovyx90:" in format_transcript(messages, speaker_aliases(messages))
+
+
+def test_omonimi_restano_persone_diverse() -> None:
+    """Due amici con lo stesso nome: l'id Telegram e' l'unica chiave sicura."""
+    messages = [
+        {"user_id": 1, "display_name": "Luca", "text": "io dico di si"},
+        {"user_id": 2, "display_name": "Luca", "text": "io dico di no"},
+    ]
+    assert len(speaker_aliases(messages)) == 2
+
+
+def test_anonimato_ancora_disponibile() -> None:
+    messages = [
+        {"user_id": 1, "username": "mario99", "display_name": "Mario", "text": "ciao @luigi"},
+        {"user_id": 1, "username": "mario99", "display_name": "Mario", "text": "ci sei?"},
+    ]
+    transcript = format_transcript(messages, limit=10, anonymize=True)
+    assert "Mario" not in transcript
     assert "@luigi" not in transcript
-    assert "@/" in transcript
-    # Stesso interlocutore -> stesso alias
     assert transcript.count("utente A") == 2
 
 
 def test_system_prompt_mentions_mode_and_guardrails() -> None:
     prompt = build_system_prompt("roast", "chaos", "carico e positivo")
     assert "Allys" in prompt
-    assert "@/" in prompt
+    assert "per nome" in prompt
+    assert "@/" not in prompt
+    assert "@/" in build_system_prompt("roast", "chaos", "sereno", anonymize=True)
     helpful = build_system_prompt("helpful", "soft", "teso", "Borsa: dati...")
     assert "Borsa" in helpful
 
@@ -85,13 +111,12 @@ def test_response_budget() -> None:
 
 def test_bot_messages_labeled_as_allys() -> None:
     messages = [
-        {"username": "mario", "text": "ciao allys"},
+        {"user_id": 1, "username": "mario99", "display_name": "Mario", "text": "ciao allys"},
         {"username": "Allys", "text": "ehila, come va?"},
-        {"username": "mario", "text": "tutto bene"},
+        {"user_id": 1, "username": "mario99", "display_name": "Mario", "text": "tutto bene"},
     ]
     aliases = speaker_aliases(messages)
     transcript = format_transcript(messages, aliases)
     assert "Allys: ehila" in transcript
-    # Mario resta un utente anonimo e stabile
-    assert transcript.count("utente A") == 2
-    assert "Allys" not in aliases.get("u:mario", "")
+    assert transcript.count("Mario:") == 2
+    assert aliases["allys"] == "Allys"

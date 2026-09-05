@@ -95,6 +95,8 @@ class Services:
     giphy_api_key: str
     tenor_api_key: str
     meme_reddit_fallback: bool
+    # Default: in una chat tra amici il modello vede i nomi veri.
+    anonymize_speakers: bool = False
 
 
 services = Services()
@@ -143,6 +145,7 @@ def setup_router(
     giphy_api_key: str = "",
     tenor_api_key: str = "",
     meme_reddit_fallback: bool = True,
+    anonymize_speakers: bool = False,
 ) -> Router:
     services.db = db
     services.rag = rag
@@ -158,6 +161,7 @@ def setup_router(
     services.features = features or {}
     services.giphy_api_key = giphy_api_key
     services.tenor_api_key = tenor_api_key
+    services.anonymize_speakers = anonymize_speakers
     services.meme_reddit_fallback = meme_reddit_fallback
     return router
 
@@ -1003,7 +1007,7 @@ async def recap(message: Message) -> None:
     if len(recent) < 4:
         await message.answer("Non c'e ancora abbastanza da riassumere. Scrivete un po' e poi richiamatemi con /recap.")
         return
-    transcript = format_transcript(recent, limit=50)
+    transcript = format_transcript(recent, limit=50, anonymize=services.anonymize_speakers)
     notice = await message.answer("Sto ripassando la conversazione...")
     try:
         summary = await services.ollama.chat(
@@ -1016,7 +1020,7 @@ async def recap(message: Message) -> None:
                         "Niente markdown pesante, al massimo dei trattini a inizio riga."
                     ),
                 },
-                {"role": "user", "content": f"Trascrizione anonimizzata:\n{transcript}\n\nFammi un recap sveglio di cosa mi sono persa."},
+                {"role": "user", "content": f"Trascrizione della chat:\n{transcript}\n\nFammi un recap sveglio di cosa mi sono persa."},
             ],
             num_predict=340,
             temperature=0.6,
@@ -1258,7 +1262,10 @@ async def build_reply(message: Message, group: dict[str, Any]) -> tuple[str, dic
     docs = await services.rag.search(chat_id, text)
     memory = "\n".join(f"- {sanitize_mentions(doc.get('text') or '')}" for doc in docs[:3])
     minigame_ctx = build_minigame_context(message) if serious_minigame else ""
-    system = build_system_prompt(mode, roast_level, mood_label, minigame_ctx, style_block(chat_id))
+    system = build_system_prompt(
+        mode, roast_level, mood_label, minigame_ctx, style_block(chat_id),
+        anonymize=services.anonymize_speakers,
+    )
 
     profile = ""
     if message.from_user:
@@ -1267,14 +1274,14 @@ async def build_reply(message: Message, group: dict[str, Any]) -> tuple[str, dic
         except Exception:
             profile = ""
 
-    transcript = format_transcript(history, limit=HISTORY_TURNS)
+    transcript = format_transcript(history, limit=HISTORY_TURNS, anonymize=services.anonymize_speakers)
     user_parts: list[str] = []
     if memory:
         user_parts.append(f"Cose che ricordi di questo gruppo:\n{memory}")
     if profile:
         user_parts.append(f"Cosa sai di chi ti scrive (uso interno, non citare nomi ne dati personali):\n{profile}")
     if transcript:
-        user_parts.append(f"Come si sta svolgendo la conversazione (anonimizzata):\n{transcript}")
+        user_parts.append(f"Come si sta svolgendo la conversazione:\n{transcript}")
     user_parts.append(f"Rispondi a quest'ultimo messaggio, restando nel filo del discorso:\n{sanitize_mentions(text)}")
 
     reply = await services.ollama.chat(
@@ -1937,12 +1944,13 @@ async def build_spontaneous_reply(
     if mode == "roast" and random.random() < float(tone.get("helpful_bonus", 0.0)):
         mode = "helpful"
     system = build_system_prompt(
-        mode, roast_level, mood_label, "", style_block(chat_id), spontaneous=True
+        mode, roast_level, mood_label, "", style_block(chat_id), spontaneous=True,
+        anonymize=services.anonymize_speakers,
     )
     parts: list[str] = []
-    transcript = format_transcript(recent, limit=HISTORY_TURNS)
+    transcript = format_transcript(recent, limit=HISTORY_TURNS, anonymize=services.anonymize_speakers)
     if transcript:
-        parts.append(f"Come si sta svolgendo la conversazione (anonimizzata):\n{transcript}")
+        parts.append(f"Come si sta svolgendo la conversazione:\n{transcript}")
     if kind == "borsa" and movers:
         mover = movers[0]
         parts.append(

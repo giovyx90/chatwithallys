@@ -118,11 +118,27 @@ DejaVu, gia' inclusi nel `Dockerfile` (`fonts-dejavu-core`).
 Allys risponde quando un messaggio contiene `Allys`, quando qualcuno fa reply a
 un suo messaggio e, ogni tanto, di sua iniziativa (vedi "Parlare da sola").
 Quando risponde tiene conto del filo della conversazione (gli ultimi messaggi,
-anonimizzati) e dell'umore del gruppo, e adatta il tono: piu utile e calorosa se
-l'aria e tesa, piu pungente se il gruppo e su di giri. La scelta roast/utile non
-e piu casuale ma dipende dall'intento del messaggio (domande e richieste di aiuto
-ottengono sempre una risposta concreta) e dal `roast_level` del gruppo.
-Le risposte AI sono tenute brevi e gli `@username` vengono sostituiti con `@/`.
+con i nomi di chi parla) e dell'umore del gruppo, e adatta il tono: piu utile e
+calorosa se l'aria e tesa, piu pungente se il gruppo e su di giri. La scelta
+roast/utile non e piu casuale ma dipende dall'intento del messaggio (domande e
+richieste di aiuto ottengono sempre una risposta concreta) e dal `roast_level`
+del gruppo. Le risposte AI sono tenute brevi.
+
+### Nomi veri, non "utente A"
+
+Il modello vede i nomi Telegram di chi parla, e si rivolge alle persone per nome.
+E' il default perche' in una chat tra amici l'anonimato costa ogni battuta che
+abbia bisogno di sapere *chi* ha detto una cosa. I nomi arrivano da `group_users`,
+quindi funzionano anche sui messaggi gia' archiviati; chi non ha un nome Telegram
+compare con lo `@username`, e chi non ha nemmeno quello resta "utente A".
+
+Restano fermi i guardrail che contano: niente fatti inventati sulle persone,
+niente dati privati (numeri, indirizzi, lavoro, relazioni) anche se sono passati
+in chat, niente attacchi personali gravi.
+
+Con `ANONYMIZE_SPEAKERS=true` si torna agli alias "utente A/B/C" e gli
+`@username` vengono sostituiti con `@/`: serve se metti Allys in un gruppo grosso
+dove non si conoscono tutti.
 Se in un thread appena avviato con Allys arriva un follow-up (una domanda), puo
 intervenire anche senza essere chiamata per nome, con finestra e cooldown
 anti-spam. Ricorda anche le proprie risposte, quindi la conversazione le "torna"
