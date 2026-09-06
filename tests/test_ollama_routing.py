@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from allys import ollama as ollama_module
-from allys.ollama import OllamaClient
+from allys.ollama import BrainBusy, BrainUnavailable, OllamaClient
 
 
 class FakeSettings:
@@ -16,6 +16,10 @@ class FakeSettings:
     ollama_gpu_chat_model = "qwen3:8b"
     ollama_gpu_probe_seconds = 30
     ollama_gpu_predict_scale = 2.0
+    ollama_timeout_seconds = 120
+    ollama_gpu_timeout_seconds = 60
+    ollama_max_queue = 2
+    ollama_keep_alive = "30m"
 
 
 class FakeResponse:
@@ -37,6 +41,9 @@ class FakeHttpx:
     def __init__(self):
         self.gpu_up = True
         self.gpu_chat_fails = False
+        self.vps_chat_fails = False
+        self.empty_answer = False
+        self.hold: asyncio.Event | None = None
         self.calls: list[tuple[str, dict]] = []
 
     def AsyncClient(self, **_kwargs):  # noqa: N802 - mimics httpx
@@ -58,10 +65,16 @@ class FakeHttpx:
             async def post(self, url, json):
                 outer.calls.append(("POST", {"url": url, **json}))
                 is_gpu = "11435" in url
+                if outer.hold is not None and url.endswith("/api/chat"):
+                    await outer.hold.wait()
                 if is_gpu and (not outer.gpu_up or outer.gpu_chat_fails):
                     raise ConnectionRefusedError(url)
                 if url.endswith("/api/embed"):
                     return FakeResponse({"embeddings": [[0.1, 0.2]]})
+                if not is_gpu and outer.vps_chat_fails:
+                    raise TimeoutError(url)
+                if outer.empty_answer:
+                    return FakeResponse({"message": {"content": "   ", "thinking": ""}})
                 who = "gpu" if is_gpu else "vps"
                 return FakeResponse({"message": {"content": f"ciao dal {who}"}})
 
@@ -144,3 +157,50 @@ def test_status_dice_chi_sta_rispondendo(fake_httpx):
     }
     fake_httpx.gpu_up = False
     assert run(client.status())["active"] == "vps"
+
+
+# --- quando non c'e' risposta ------------------------------------------------
+# Prima ``chat`` restituiva una frase di scuse: finiva in chat, e da li nella
+# cronologia del gruppo come se Allys l'avesse detta apposta.
+
+
+def test_se_nessuno_risponde_lo_dice_a_chi_chiama(fake_httpx):
+    fake_httpx.gpu_up = False
+    fake_httpx.vps_chat_fails = True
+    client = OllamaClient(FakeSettings())
+    with pytest.raises(BrainUnavailable):
+        run(client.chat([{"role": "user", "content": "ehi"}]))
+
+
+def test_una_risposta_vuota_non_e_una_risposta(fake_httpx):
+    fake_httpx.gpu_up = False
+    fake_httpx.empty_answer = True
+    client = OllamaClient(FakeSettings())
+    with pytest.raises(BrainUnavailable):
+        run(client.chat([{"role": "user", "content": "ehi"}]))
+
+
+def test_oltre_la_coda_rinuncia_subito(fake_httpx):
+    """Sulla CPU della VPS le richieste in eccesso scadrebbero tutte insieme."""
+
+    async def scenario():
+        client = OllamaClient(FakeSettings())
+        client._bind_loop()
+        fake_httpx.hold = asyncio.Event()
+        # una in esecuzione + due in coda: la quarta non viene nemmeno accettata
+        tasks = [asyncio.create_task(client.chat([{"role": "user", "content": "ehi"}])) for _ in range(3)]
+        await asyncio.sleep(0)
+        with pytest.raises(BrainBusy):
+            await client.chat([{"role": "user", "content": "ehi"}])
+        fake_httpx.hold.set()
+        assert await asyncio.gather(*tasks) == ["ciao dal gpu"] * 3
+
+    run(scenario())
+
+
+def test_il_modello_resta_caldo_tra_una_domanda_e_l_altra(fake_httpx):
+    """Senza keep_alive ogni risposta ripaga i sette secondi di caricamento."""
+    client = OllamaClient(FakeSettings())
+    run(client.chat([{"role": "user", "content": "ehi"}]))
+    post = next(call[1] for call in fake_httpx.calls if call[0] == "POST")
+    assert post["keep_alive"] == "30m"

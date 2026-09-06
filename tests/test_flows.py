@@ -9,12 +9,14 @@ l'autonomia si ferma quando deve.
 
 from __future__ import annotations
 
+import asyncio
 import types
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 import allys.bot as bot_module
+from allys.ollama import BrainUnavailable
 
 
 class FakeDB:
@@ -87,10 +89,26 @@ class FakeDB:
 class FakeOllama:
     def __init__(self) -> None:
         self.last_system = ""
+        self.broken = False
+        self.calls = 0
+        self.gate: asyncio.Event | None = None
 
-    async def chat(self, messages, num_predict=56, temperature=0.75):
+    async def chat(self, messages, num_predict=56, temperature=0.75, timeout=None):
+        self.calls += 1
         self.last_system = messages[0]["content"]
+        if self.gate is not None:
+            await self.gate.wait()
+        if self.broken:
+            raise BrainUnavailable("il modello non risponde")
         return "Comunque quella pizzeria fa schifo, cambiamo."
+
+
+class FakeRag:
+    async def search(self, chat_id, text, limit=3):
+        return []
+
+    async def remember(self, *a, **k):
+        return None
 
 
 class FakeMessage:
@@ -127,6 +145,10 @@ class FakeBot:
         self.sent.append(("photo", len(photo.data), caption))
         return FakeMessage(caption or "")
 
+    async def send_chat_action(self, chat_id, action, **kwargs):
+        self.sent.append(("action", action))
+        return True
+
 
 @pytest.fixture
 def wired(monkeypatch):
@@ -134,11 +156,15 @@ def wired(monkeypatch):
     ollama = FakeOllama()
     monkeypatch.setattr(bot_module.services, "db", db, raising=False)
     monkeypatch.setattr(bot_module.services, "ollama", ollama, raising=False)
+    monkeypatch.setattr(bot_module.services, "rag", FakeRag(), raising=False)
     monkeypatch.setattr(bot_module.services, "public_base_url", "https://allys.test", raising=False)
     monkeypatch.setattr(bot_module.services, "features", {"market": True}, raising=False)
     bot_module._STYLE_CACHE.clear()
     bot_module._TONE_CACHE.clear()
     bot_module._LAST_ALLYS_MESSAGE_ID.clear()
+    bot_module._BRAIN_NOTICE_AT.clear()
+    bot_module._LAST_ALLYS_REPLY_AT.clear()
+    bot_module._GENERATING.clear()
     return types.SimpleNamespace(db=db, ollama=ollama, bot=FakeBot())
 
 
@@ -236,3 +262,59 @@ async def test_chiusura_di_borsa(wired) -> None:
     assert await bot_module.send_market_report(wired.bot, -100) is True
     kind, size, caption = wired.bot.sent[-1]
     assert kind == "photo" and size > 5_000 and caption
+
+
+# --- quando il cervello non risponde -----------------------------------------
+# Il bug che aveva stufato il gruppo: Ollama in timeout e Allys che rispondeva
+# "il cervello locale sta facendo una pausa" a ogni singolo messaggio.
+
+
+async def test_se_il_cervello_tace_non_dice_niente_a_chi_non_l_ha_chiamata(wired) -> None:
+    wired.ollama.broken = True
+    message = FakeMessage("ma quindi stasera?")
+
+    sent = await bot_module.reply_and_send(
+        message, wired.bot, wired.db.group_settings(-100), announce_failure=False
+    )
+
+    assert sent is False
+    assert message.sent == []
+
+
+async def test_a_chi_la_chiama_lo_dice_una_volta_sola(wired) -> None:
+    wired.ollama.broken = True
+    group = wired.db.group_settings(-100)
+
+    primo = FakeMessage("allys ci sei?")
+    await bot_module.reply_and_send(primo, wired.bot, group, announce_failure=True)
+    secondo = FakeMessage("allys?")
+    await bot_module.reply_and_send(secondo, wired.bot, group, announce_failure=True)
+
+    assert len(primo.sent) == 1 and "non riesco" in primo.sent[0][1]
+    assert secondo.sent == []  # l'avviso e' gia' stato dato poco fa
+
+
+async def test_non_scrive_due_risposte_alla_volta(wired) -> None:
+    """Su CPU una risposta ci mette; i messaggi che arrivano intanto non ne accodano altre."""
+    wired.ollama.gate = asyncio.Event()
+    group = wired.db.group_settings(-100)
+    prima = asyncio.create_task(
+        bot_module.reply_and_send(FakeMessage("allys una cosa"), wired.bot, group, announce_failure=True)
+    )
+    await asyncio.sleep(0)
+
+    seconda = FakeMessage("allys un'altra")
+    assert await bot_module.reply_and_send(seconda, wired.bot, group, announce_failure=True) is False
+    assert seconda.sent == []
+
+    wired.ollama.gate.set()
+    assert await prima is True
+    assert wired.ollama.calls == 1
+    # e nel frattempo il gruppo ha visto che stava scrivendo
+    assert ("action", "typing") in wired.bot.sent
+
+
+async def test_niente_intervento_spontaneo_se_il_cervello_tace(wired) -> None:
+    wired.ollama.broken = True
+    assert await bot_module.maybe_speak_spontaneously(wired.bot, -100) is False
+    assert wired.bot.sent == []

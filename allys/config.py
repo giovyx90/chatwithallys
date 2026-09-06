@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     ollama_gpu_chat_model: str = Field("", alias="OLLAMA_GPU_CHAT_MODEL")
     ollama_gpu_probe_seconds: int = Field(30, alias="OLLAMA_GPU_PROBE_SECONDS")
     ollama_gpu_predict_scale: float = Field(1.6, alias="OLLAMA_GPU_PREDICT_SCALE")
+    # Quanto aspettare il modello prima di rinunciare: sulla CPU della VPS una
+    # risposta corta sta sotto il minuto, oltre non interessa piu' a nessuno.
+    ollama_timeout_seconds: int = Field(120, alias="OLLAMA_TIMEOUT_SECONDS")
+    ollama_gpu_timeout_seconds: int = Field(60, alias="OLLAMA_GPU_TIMEOUT_SECONDS")
+    ollama_max_queue: int = Field(2, alias="OLLAMA_MAX_QUEUE")
+    ollama_keep_alive: str = Field("30m", alias="OLLAMA_KEEP_ALIVE")
     podcast_timezone: str = Field("Europe/Rome", alias="PODCAST_TIMEZONE")
     predictions_base_url: str = Field("https://predictions.giovyx-server.it", alias="PREDICTIONS_BASE_URL")
     predictions_session_secret: str = Field("", alias="PREDICTIONS_SESSION_SECRET")

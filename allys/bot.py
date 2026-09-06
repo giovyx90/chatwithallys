@@ -8,6 +8,8 @@ import logging
 import re
 import time
 from base64 import urlsafe_b64encode
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from dataclasses import replace
 from typing import Any
@@ -36,7 +38,7 @@ from allys.memes import (
     should_attach_meme,
     tags_for_media,
 )
-from allys.ollama import OllamaClient
+from allys.ollama import BrainUnavailable, OllamaClient
 from allys.place import PlaceService
 from allys.podcast import PodcastService, parse_podcast_config
 from allys.rag import RagMemory
@@ -105,6 +107,17 @@ _LAST_ALLYS_REPLY_AT: dict[int, float] = {}
 _LAST_PROACTIVE_AT: dict[int, float] = {}
 _PROACTIVE_WINDOW_SECONDS = 150
 _PROACTIVE_COOLDOWN_SECONDS = 90
+
+# Quando il modello non risponde, Allys tace. Lo dice solo a chi l'ha chiamata
+# davvero, e non piu' di una volta ogni quarto d'ora per chat: prima bastava un
+# Ollama lento perche' ogni messaggio del gruppo si prendesse la sua scusa.
+_BRAIN_NOTICE_AT: dict[int, float] = {}
+_BRAIN_NOTICE_COOLDOWN_SECONDS = 900
+
+# Chat per cui una risposta e' gia' in cottura: i messaggi che arrivano nel
+# frattempo non ne accodano un'altra, o il gruppo si ritrova tre risposte alla
+# stessa battuta con due minuti di ritardo.
+_GENERATING: set[int] = set()
 
 # Ultimo messaggio di Allys per chat: serve per attribuirle il voto quando
 # qualcuno reagisce, risponde o le dice di stare zitta.
@@ -251,8 +264,75 @@ async def _send_private_miniapp_link(
         await message.answer("Non posso scriverti in privato. Aprimi qui prima in DM con /start e poi riprova.")
 
 
-def _local_brain_error_text() -> str:
-    return "Il cervello locale sta facendo una pausa: riprovo tra poco."
+async def _say_brain_is_down(message: Message) -> None:
+    """Avvisa che non ce la fa, al massimo una volta ogni quarto d'ora per chat."""
+    now = time.time()
+    if now - _BRAIN_NOTICE_AT.get(message.chat.id, 0.0) < _BRAIN_NOTICE_COOLDOWN_SECONDS:
+        return
+    _BRAIN_NOTICE_AT[message.chat.id] = now
+    try:
+        await message.answer("Sto girando a rilento e non riesco a risponderti adesso, riprova tra un po'.")
+    except Exception:
+        logger.info("could not warn about the brain in chat_id=%s", message.chat.id)
+
+
+async def reply_and_send(
+    message: Message, bot: Bot, group: dict[str, Any], *, announce_failure: bool
+) -> bool:
+    """Costruisce la risposta e la manda. Se il cervello non c'e', tace.
+
+    ``announce_failure`` e' vero solo quando qualcuno l'ha chiamata davvero: a
+    un'intromissione fallita nessuno tiene, e dirlo sarebbe solo rumore.
+    """
+    chat_id = message.chat.id
+    if chat_id in _GENERATING:
+        logger.info("skipping reply for chat_id=%s: one is already being written", chat_id)
+        return False
+    _GENERATING.add(chat_id)
+    try:
+        async with _typing(bot, chat_id):
+            reply, meta = await build_reply(message, group)
+    except BrainUnavailable as error:
+        logger.info("brain unavailable for chat_id=%s: %s", chat_id, error)
+        if announce_failure:
+            await _say_brain_is_down(message)
+        return False
+    except Exception:
+        logger.exception("failed to build AI reply for chat_id=%s", chat_id)
+        if announce_failure:
+            await _say_brain_is_down(message)
+        return False
+    finally:
+        _GENERATING.discard(chat_id)
+    await send_allys_reply(message, group, reply, meta)
+    return True
+
+
+@asynccontextmanager
+async def _typing(bot: Bot, chat_id: int) -> AsyncIterator[None]:
+    """Tiene su il puntino "sta scrivendo" finche' il modello lavora.
+
+    Telegram lo spegne dopo cinque secondi e sulla CPU della VPS una risposta ne
+    prende una trentina: senza rinnovarlo, il gruppo la darebbe per persa.
+    """
+
+    async def keep_alive() -> None:
+        try:
+            while True:
+                await bot.send_chat_action(chat_id, "typing")
+                await asyncio.sleep(4)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.info("could not send typing action to chat_id=%s", chat_id)
+
+    task = asyncio.create_task(keep_alive())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 def _match_group_reference(
@@ -1020,6 +1100,7 @@ async def recap(message: Message) -> None:
             ],
             num_predict=340,
             temperature=0.6,
+            timeout=300,
         )
     except Exception:
         logger.exception("failed to build recap for chat_id=%s", message.chat.id)
@@ -1146,13 +1227,10 @@ async def media_message(message: Message, bot: Bot) -> None:
         row_id = services.db.add_message(message.chat.id, message.from_user.id if message.from_user else None, message.from_user.username if message.from_user else None, caption, sentiment)
         if should_remember(caption) and message.from_user:
             await services.rag.remember(message.chat.id, row_id, caption, {"username": message.from_user.username, "media": True})
-        if caption and not is_quiet(group) and await should_reply(message, bot, group):
-            try:
-                reply, meta = await build_reply(message, group)
-                await send_allys_reply(message, group, reply, meta)
-            except Exception:
-                logger.exception("failed to build media AI reply for chat_id=%s", message.chat.id)
-                await message.answer(_local_brain_error_text())
+        if caption and not is_quiet(group):
+            trigger = await reply_trigger(message, bot, group)
+            if trigger:
+                await reply_and_send(message, bot, group, announce_failure=trigger != "proattiva")
 
 
 @router.message(F.text)
@@ -1169,14 +1247,10 @@ async def group_text(message: Message, bot: Bot) -> None:
     if await handle_shutup_request(message, bot, text):
         return
     replied = False
-    if not is_quiet(group) and await should_reply(message, bot, group):
-        try:
-            reply, meta = await build_reply(message, group)
-            await send_allys_reply(message, group, reply, meta)
-            replied = True
-        except Exception:
-            logger.exception("failed to build AI reply for chat_id=%s", message.chat.id)
-            await message.answer(_local_brain_error_text())
+    if not is_quiet(group):
+        trigger = await reply_trigger(message, bot, group)
+        if trigger:
+            replied = await reply_and_send(message, bot, group, announce_failure=trigger != "proattiva")
     if not replied:
         await maybe_react(message, bot, group, sentiment)
     if message.from_user:
@@ -1196,12 +1270,7 @@ async def channel_text(message: Message, bot: Bot) -> None:
     if should_remember(text):
         await services.rag.remember(message.chat.id, row_id, text, {"channel": True})
     if not is_quiet(group) and text and "allys" in text.lower():
-        try:
-            reply, meta = await build_reply(message, group)
-            await send_allys_reply(message, group, reply, meta)
-        except Exception:
-            logger.exception("failed to build channel AI reply for chat_id=%s", message.chat.id)
-            await message.answer(_local_brain_error_text())
+        await reply_and_send(message, bot, group, announce_failure=True)
 
 
 async def ensure_context(message: Message) -> dict[str, Any]:
@@ -1212,13 +1281,19 @@ async def ensure_context(message: Message) -> dict[str, Any]:
     return group
 
 
-async def should_reply(message: Message, bot: Bot, group: dict[str, Any]) -> bool:
+async def reply_trigger(message: Message, bot: Bot, group: dict[str, Any]) -> str | None:
+    """Perche' Allys risponde a questo messaggio, o None se non risponde.
+
+    Il motivo conta: a chi la chiama per nome o le risponde deve una risposta
+    (e, se non ce la fa, una parola), mentre un'intromissione a vuoto passa in
+    silenzio.
+    """
     me = await bot.me()
     if message.reply_to_message and message.reply_to_message.from_user:
         if message.reply_to_message.from_user.id == me.id:
-            return True
+            return "risposta"
     if message.text and "allys" in message.text.lower():
-        return True
+        return "nome"
     # Risposta proattiva: se Allys ha parlato da poco in questa chat e arriva un
     # follow-up (una domanda), interviene anche senza essere chiamata per nome,
     # con una finestra temporale e un cooldown anti-spam.
@@ -1228,8 +1303,8 @@ async def should_reply(message: Message, bot: Bot, group: dict[str, Any]) -> boo
     if (now - last_allys) <= _PROACTIVE_WINDOW_SECONDS and (now - last_proactive) >= _PROACTIVE_COOLDOWN_SECONDS:
         if _looks_like_followup(message.text or ""):
             _LAST_PROACTIVE_AT[message.chat.id] = now
-            return True
-    return False
+            return "proattiva"
+    return None
 
 
 async def build_reply(message: Message, group: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -1992,7 +2067,17 @@ async def maybe_speak_spontaneously(bot: Bot, chat_id: int) -> bool:
     if not decision.speak:
         return False
 
-    reply = await build_spontaneous_reply(chat_id, group, decision.kind, movers)
+    if chat_id in _GENERATING:
+        return False
+    _GENERATING.add(chat_id)
+    try:
+        reply = await build_spontaneous_reply(chat_id, group, decision.kind, movers)
+    except BrainUnavailable as error:
+        # Nessuno l'aspettava: se il modello tace, tace anche lei.
+        logger.info("intervento spontaneo saltato in chat_id=%s: %s", chat_id, error)
+        return False
+    finally:
+        _GENERATING.discard(chat_id)
     if not reply:
         return False
     sent: Message | None = None
