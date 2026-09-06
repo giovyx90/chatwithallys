@@ -45,11 +45,16 @@ from allys.rag import RagMemory
 from allys.brain import (
     BOT_AUTHOR,
     HISTORY_TURNS,
+    RepeatedReply,
     build_system_prompt,
     choose_mode,
     classify_intent,
+    bounces_the_question,
+    format_self_replies_block,
     format_transcript,
     group_mood,
+    looks_recycled,
+    recent_self_replies,
     response_budget,
 )
 from allys.media import fetch_working_meme
@@ -292,6 +297,10 @@ async def reply_and_send(
     try:
         async with _typing(bot, chat_id):
             reply, meta = await build_reply(message, group)
+    except RepeatedReply:
+        # Non e' un guasto: non aveva niente di nuovo da dire, e tacere e' meglio.
+        logger.info("reply skipped in chat_id=%s: nothing new to say", chat_id)
+        return False
     except BrainUnavailable as error:
         logger.info("brain unavailable for chat_id=%s: %s", chat_id, error)
         if announce_failure:
@@ -1343,6 +1352,7 @@ async def build_reply(message: Message, group: dict[str, Any]) -> tuple[str, dic
             profile = ""
 
     transcript = format_transcript(history, limit=HISTORY_TURNS)
+    said_before = recent_self_replies(history)
     user_parts: list[str] = []
     if memory:
         user_parts.append(f"Cose che ricordi di questo gruppo:\n{memory}")
@@ -1350,16 +1360,52 @@ async def build_reply(message: Message, group: dict[str, Any]) -> tuple[str, dic
         user_parts.append(f"Cosa sai di chi ti scrive (uso interno, non citare nomi ne dati personali):\n{profile}")
     if transcript:
         user_parts.append(f"Come si sta svolgendo la conversazione (anonimizzata):\n{transcript}")
-    user_parts.append(f"Rispondi a quest'ultimo messaggio, restando nel filo del discorso:\n{sanitize_mentions(text)}")
-
-    reply = await services.ollama.chat(
-        [
-            {"role": "system", "content": system},
-            {"role": "user", "content": "\n\n".join(user_parts)},
-        ],
-        num_predict=response_budget(intent),
-        temperature=0.68 if mode == "helpful" else 0.88,
+    echo_block = format_self_replies_block(said_before)
+    if echo_block:
+        user_parts.append(echo_block)
+    user_parts.append(
+        "Rispondi a quest'ultimo messaggio, nel merito e con qualcosa che non hai gia' detto:\n"
+        f"{sanitize_mentions(text)}"
     )
+
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": "\n\n".join(user_parts)},
+    ]
+    temperature = 0.68 if mode == "helpful" else 0.88
+    budget = response_budget(intent)
+    reply = await services.ollama.chat(messages, num_predict=budget, temperature=temperature)
+    recycled = looks_recycled(reply, said_before)
+    if recycled or bounces_the_question(reply):
+        # Il prompt gliel'aveva detto e l'ha fatto lo stesso: glielo si fa notare
+        # con la risposta sbagliata sotto gli occhi. Costa poco, il contesto e'
+        # gia' caricato.
+        logger.info(
+            "reply %s in chat_id=%s, asking again",
+            "looked recycled" if recycled else "bounced the question back",
+            chat_id,
+        )
+        correction = (
+            "Questa e' la stessa risposta che hai gia' dato poco fa, con le parole girate. "
+            "Riscrivila da zero: altra idea, altro attacco, e stavolta di' davvero qualcosa "
+            "sull'ultimo messaggio."
+            if recycled
+            else "Questa rigira la domanda invece di rispondere. Riscrivila cominciando dalla "
+            "risposta vera, senza ripetere quello che ti hanno chiesto."
+        )
+        reply = await services.ollama.chat(
+            messages
+            + [
+                {"role": "assistant", "content": reply},
+                {"role": "user", "content": correction},
+            ],
+            num_predict=budget,
+            temperature=min(1.1, temperature + 0.15),
+        )
+        # Un secondo rimbalzo lo si lascia passare: quello che non deve uscire e'
+        # la battuta gia' sentita tre volte.
+        if looks_recycled(reply, said_before):
+            raise RepeatedReply("il modello continua a ripetersi")
     base_chars = 420 if intent in {"help", "question", "minigame"} else 300
     max_chars = max(120, int(base_chars * float(tone.get("length_factor", 1.0))))
     meta = {"mode": mode, "intent": intent, "prompt": text, "spontaneous": False}
@@ -2016,8 +2062,12 @@ async def build_spontaneous_reply(
     )
     parts: list[str] = []
     transcript = format_transcript(recent, limit=HISTORY_TURNS)
+    said_before = recent_self_replies(recent)
     if transcript:
         parts.append(f"Come si sta svolgendo la conversazione (anonimizzata):\n{transcript}")
+    echo_block = format_self_replies_block(said_before)
+    if echo_block:
+        parts.append(echo_block)
     if kind == "borsa" and movers:
         mover = movers[0]
         parts.append(
@@ -2033,6 +2083,9 @@ async def build_spontaneous_reply(
         num_predict=120,
         temperature=0.9,
     )
+    if looks_recycled(reply, said_before):
+        # Si intromette di sua iniziativa: se ha solo da ripetersi, sta zitta.
+        raise RepeatedReply("intervento spontaneo uguale a quelli di prima")
     max_chars = max(90, int(220 * float(tone.get("length_factor", 1.0))))
     return shorten_reply(sanitize_mentions(reply), max_chars=max_chars)
 
@@ -2072,6 +2125,9 @@ async def maybe_speak_spontaneously(bot: Bot, chat_id: int) -> bool:
     _GENERATING.add(chat_id)
     try:
         reply = await build_spontaneous_reply(chat_id, group, decision.kind, movers)
+    except RepeatedReply:
+        logger.info("intervento spontaneo saltato in chat_id=%s: si stava ripetendo", chat_id)
+        return False
     except BrainUnavailable as error:
         # Nessuno l'aspettava: se il modello tace, tace anche lei.
         logger.info("intervento spontaneo saltato in chat_id=%s: %s", chat_id, error)

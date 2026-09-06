@@ -208,6 +208,13 @@ class OllamaClient:
                     "options": {
                         "num_predict": backend.scaled(num_predict),
                         "temperature": temperature,
+                        # Il contesto e' pieno di roba da cui copiare: la chat, le
+                        # sue risposte di prima, il messaggio a cui risponde. Senza
+                        # una penalita' che guarda indietro abbastanza, un modello
+                        # da 8B ricicla la frase che ha appena letto.
+                        "repeat_penalty": 1.15,
+                        "repeat_last_n": 256,
+                        "frequency_penalty": 0.3,
                     },
                 },
             )

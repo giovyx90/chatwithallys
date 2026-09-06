@@ -66,17 +66,35 @@ accorgersene e li usa per costruirsi lo stile.
   registrato da solo all'avvio, vedi `TELEGRAM_AUTO_WEBHOOK`). Se Allys non e'
   admin non si rompe niente: resta il segnale delle risposte, che funziona
   sempre.
-- **Risposte**: se qualcuno replica a un suo messaggio e' gia' un segnale
-  positivo, pesato con il sentiment della replica. "Stai zitta" lo ribalta.
+- **Risposte**: se qualcuno replica a un suo messaggio e' un segnale positivo
+  **debole** (0.15), pesato con il sentiment della replica. "Stai zitta" lo
+  ribalta. Debole apposta: un gruppo che la stuzzica per sfotterla replica
+  tantissimo, e con un bonus generoso quelle battute diventavano gli esempi di
+  come parla bene.
 - **Esempi di stile**: le risposte con punteggio piu' alto tornano nel prompt
-  come esempi few-shot. Allys imita il taglio di quello che in *quel* gruppo ha
-  gia' funzionato, non un tono generico.
+  come esempi few-shot, ma solo sopra 1.0, cioe' quando c'e' stata una risata o
+  una reaction vera. Tre varianti della stessa formula contano per una: sono un
+  tic, non tre esempi.
 - **Lessico**: i tormentoni ricorrenti (parole e coppie di parole usate da almeno
   due persone diverse) finiscono nel prompt. Chi spamma la stessa parola da solo
   non conta.
 - **Taratura**: se il gradimento medio scende, Allys accorcia le risposte e vira
   sull'utile; se sale, si allunga un po'. `/autonomia` senza argomenti mostra il
   gradimento corrente.
+
+### Non ripetersi
+
+Le risposte di Allys vengono salvate come messaggi del gruppo, quindi rientrano
+nel prompt dopo. Senza contromisure un modello da 8B legge tre volte la stessa
+struttura e la prende per il modo giusto di parlare: e' cosi' che era nato il
+pappagallo *"Vuoi che ti dica X? Bene, ma non e' diventato dittatore di Liberty
+Bay, no?"*, ripetuto a qualsiasi domanda.
+
+Adesso le sue ultime cinque frasi entrano nel prompt come **divieto** e non come
+contesto, il sampling penalizza la copia dal prompt (`repeat_last_n` alzato), e
+una risposta che ricicla una frase gia' detta o che rimbalza la domanda ("Vuoi
+sapere se...") viene rigenerata una volta con l'errore sotto gli occhi. Se anche
+il secondo tentativo e' la stessa cosa, Allys tace.
 
 ## Parlare da sola
 

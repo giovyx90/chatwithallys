@@ -1,5 +1,6 @@
 import random
 
+from allys import brain
 from allys.brain import (
     build_system_prompt,
     choose_mode,
@@ -95,3 +96,59 @@ def test_bot_messages_labeled_as_allys() -> None:
     # Mario resta un utente anonimo e stabile
     assert transcript.count("utente A") == 2
     assert "Allys" not in aliases.get("u:mario", "")
+
+
+# --- non ripetersi -----------------------------------------------------------
+# Nel gruppo era finita cosi': "Vuoi che ti dica X? Bene, ma non e' diventato
+# dittatore di Liberty Bay, no?" per tre messaggi diversi di fila. Le sue
+# risposte stanno nella trascrizione, e il modello le prendeva per lo stile giusto.
+
+
+def test_riconosce_la_risposta_riciclata() -> None:
+    prima = [
+        "Vuoi che ti dica a che gioco vuoi giocare? Bene, ma non e' diventato dittatore di Atlantis, no?"
+    ]
+    assert brain.looks_recycled(
+        "Vuoi che ti dica che ne penso? Bene, ma non e' diventato dittatore di Liberty Bay, no?", prima
+    )
+    assert brain.looks_recycled("Ah, ma non e' diventato dittatore di Liberty Bay, no?", prima)
+
+
+def test_una_risposta_nuova_passa() -> None:
+    prima = [
+        "Vuoi che ti dica a che gioco vuoi giocare? Bene, ma non e' diventato dittatore di Atlantis, no?"
+    ]
+    assert not brain.looks_recycled(
+        "Mbappe dittatore lo vedo solo se il regime prevede rigori a favore.", prima
+    )
+    assert not brain.looks_recycled("Dodici.", prima)
+    assert not brain.looks_recycled("qualsiasi cosa", [])
+
+
+def test_le_sue_ultime_frasi_tornano_come_divieto() -> None:
+    history = [
+        {"username": "mario", "text": "allys ci sei?"},
+        {"username": brain.BOT_AUTHOR, "text": "Sempre sul pezzo."},
+        {"username": "luca", "text": "e allora?"},
+        {"username": brain.BOT_AUTHOR, "text": "Sempre sul pezzo, no?"},
+    ]
+    said = brain.recent_self_replies(history)
+    assert said == ["Sempre sul pezzo, no?", "Sempre sul pezzo."]  # dalla piu' recente
+
+    block = brain.format_self_replies_block(said)
+    assert "Non ripeterle" in block and "Sempre sul pezzo" in block
+    assert brain.format_self_replies_block([]) == ""
+
+
+def test_il_prompt_le_chiede_di_rispondere_nel_merito() -> None:
+    prompt = brain.build_system_prompt("helpful", "medium", "sereno")
+    assert "MERITO" in prompt
+    assert "Vuoi che ti dica" in prompt  # la formula da non usare, per nome
+
+
+def test_riconosce_la_domanda_rimbalzata() -> None:
+    assert brain.bounces_the_question("Vuoi che ti dica che ne penso? Bene, ma...")
+    assert brain.bounces_the_question("Vuoi sapere se ho mai governato un paese? No.")
+    assert brain.bounces_the_question("Ah, ti stai chiedendo se ci sono stata?")
+    assert not brain.bounces_the_question("No, ma ci sono andata vicino: solo come avatar.")
+    assert not brain.bounces_the_question("Vuoi una mano con il gioco? Dimmi pure.")

@@ -147,17 +147,19 @@ def reactions_delta(old: list[str], new: list[str]) -> float:
 def reply_delta(reply_text: str) -> float:
     """Quanto vale il fatto che qualcuno *risponda* a un messaggio di Allys.
 
-    Rispondere e' gia' un segnale positivo (l'ha coinvolto), ma se la risposta e'
-    "stai zitta" il segnale si ribalta di brutto.
+    Rispondere e' un segnale positivo debole, e deve restare debole: un gruppo
+    che la stuzzica per sfotterla ("duce?", "ammazzati") risponde tantissimo, e
+    con un bonus generoso quelle battute diventavano gli esempi di come parla
+    bene. Il grosso del punteggio deve venire dal tono della risposta.
     """
     text = (reply_text or "").strip()
     if not text:
         return 0.0
     if looks_like_shutup(text):
         return -1.5
-    engagement = 0.35
+    engagement = 0.15
     sentiment = score_text(text)
-    return round(engagement + (sentiment * 0.4), 4)
+    return round(engagement + (sentiment * 0.5), 4)
 
 
 @dataclass(frozen=True)
@@ -172,12 +174,18 @@ class StyleExample:
 def select_style_examples(
     rows: list[dict[str, Any]],
     limit: int = 3,
-    min_score: float = 0.6,
+    min_score: float = 1.0,
     max_chars: int = 160,
 ) -> list[StyleExample]:
-    """Prende gli scambi meglio riusciti e li rende esempi brevi e puliti."""
+    """Prende gli scambi meglio riusciti e li rende esempi brevi e puliti.
+
+    La soglia sta sopra il semplice "qualcuno ha risposto": un esempio finisce
+    nel prompt solo se il gruppo ha riso o messo una reaction, altrimenti Allys
+    imparerebbe a imitare le battute che le hanno fatto solo del male.
+    """
     scored: list[StyleExample] = []
     seen: set[str] = set()
+    openings: set[str] = set()
     for row in sorted(rows, key=lambda item: float(item.get("score") or 0), reverse=True):
         score = float(row.get("score") or 0)
         if score < min_score:
@@ -189,6 +197,11 @@ def select_style_examples(
         key = reply.lower()[:60]
         if key in seen:
             continue
+        # Tre varianti della stessa formula non sono tre esempi: sono un tic.
+        opening = " ".join(reply.lower().split()[:3])
+        if opening in openings:
+            continue
+        openings.add(opening)
         seen.add(key)
         scored.append(
             StyleExample(prompt=prompt[:max_chars], reply=reply[:max_chars], score=round(score, 3))
