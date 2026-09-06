@@ -149,8 +149,9 @@ def build_system_prompt(
     # domanda, ripetere le parole di chi scrive, riusare la propria ultima frase.
     substance = (
         "Rispondi NEL MERITO dell'ultimo messaggio: la risposta vera sta nella prima frase. "
-        "Non rigirare la domanda a chi te l'ha fatta e non aprire mai con formule tipo "
-        "'Vuoi che ti dica'. Non ricopiare le parole del messaggio per riempire la frase. "
+        "Non rigirare la domanda a chi te l'ha fatta: mai aprire con 'Vuoi che ti dica', "
+        "'Vuoi sapere', 'Ti stai chiedendo' o formule simili. Non ricopiare le parole del "
+        "messaggio per riempire la frase. "
         "Se non sai una cosa, ammettilo in poche parole invece di girarci intorno. "
         "Cambia formula ogni volta: se le tue ultime risposte si assomigliano, questa deve "
         "suonare diversa gia' dalle prime parole."
@@ -316,6 +317,22 @@ def looks_recycled(reply: str, previous: list[str]) -> bool:
         if len(shared) >= 3 or len(shared) >= 0.4 * max(1, len(_shingles(words))):
             return True
     return False
+
+
+# Le formule con cui rimbalzava la domanda invece di rispondere: "Vuoi che ti
+# dica se ho mai fatto cadere una nazione in Sud America?" non e' una risposta,
+# e' la domanda riscritta.
+_BOUNCE_RE = re.compile(
+    r"^\s*(?:allora[, ]+|dunque[, ]+|beh[, ]+|ah[, ]+)?"
+    r"(?:vuoi (?:che ti (?:dica|risponda|spieghi)|sapere|la risposta)"
+    r"|ti stai chiedendo|mi stai chiedendo|stai chiedendo|mi chiedi|stai domandando)\b",
+    re.IGNORECASE,
+)
+
+
+def bounces_the_question(reply: str) -> bool:
+    """La risposta si apre rigirando la domanda a chi l'ha fatta?"""
+    return bool(_BOUNCE_RE.match(reply or ""))
 
 
 def _same_opening(words: list[str], old_words: list[str], size: int = 3) -> bool:

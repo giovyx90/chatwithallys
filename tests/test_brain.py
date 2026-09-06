@@ -144,3 +144,11 @@ def test_il_prompt_le_chiede_di_rispondere_nel_merito() -> None:
     prompt = brain.build_system_prompt("helpful", "medium", "sereno")
     assert "MERITO" in prompt
     assert "Vuoi che ti dica" in prompt  # la formula da non usare, per nome
+
+
+def test_riconosce_la_domanda_rimbalzata() -> None:
+    assert brain.bounces_the_question("Vuoi che ti dica che ne penso? Bene, ma...")
+    assert brain.bounces_the_question("Vuoi sapere se ho mai governato un paese? No.")
+    assert brain.bounces_the_question("Ah, ti stai chiedendo se ci sono stata?")
+    assert not brain.bounces_the_question("No, ma ci sono andata vicino: solo come avatar.")
+    assert not brain.bounces_the_question("Vuoi una mano con il gioco? Dimmi pure.")

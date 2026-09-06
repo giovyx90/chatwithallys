@@ -49,6 +49,7 @@ from allys.brain import (
     build_system_prompt,
     choose_mode,
     classify_intent,
+    bounces_the_question,
     format_self_replies_block,
     format_transcript,
     group_mood,
@@ -1374,27 +1375,35 @@ async def build_reply(message: Message, group: dict[str, Any]) -> tuple[str, dic
     temperature = 0.68 if mode == "helpful" else 0.88
     budget = response_budget(intent)
     reply = await services.ollama.chat(messages, num_predict=budget, temperature=temperature)
-    if looks_recycled(reply, said_before):
+    recycled = looks_recycled(reply, said_before)
+    if recycled or bounces_the_question(reply):
         # Il prompt gliel'aveva detto e l'ha fatto lo stesso: glielo si fa notare
         # con la risposta sbagliata sotto gli occhi. Costa poco, il contesto e'
         # gia' caricato.
-        logger.info("reply looked recycled in chat_id=%s, asking again", chat_id)
+        logger.info(
+            "reply %s in chat_id=%s, asking again",
+            "looked recycled" if recycled else "bounced the question back",
+            chat_id,
+        )
+        correction = (
+            "Questa e' la stessa risposta che hai gia' dato poco fa, con le parole girate. "
+            "Riscrivila da zero: altra idea, altro attacco, e stavolta di' davvero qualcosa "
+            "sull'ultimo messaggio."
+            if recycled
+            else "Questa rigira la domanda invece di rispondere. Riscrivila cominciando dalla "
+            "risposta vera, senza ripetere quello che ti hanno chiesto."
+        )
         reply = await services.ollama.chat(
             messages
             + [
                 {"role": "assistant", "content": reply},
-                {
-                    "role": "user",
-                    "content": (
-                        "Questa e' la stessa risposta che hai gia' dato poco fa, con le parole "
-                        "girate. Riscrivila da zero: altra idea, altro attacco, e stavolta di' "
-                        "davvero qualcosa sull'ultimo messaggio."
-                    ),
-                },
+                {"role": "user", "content": correction},
             ],
             num_predict=budget,
             temperature=min(1.1, temperature + 0.15),
         )
+        # Un secondo rimbalzo lo si lascia passare: quello che non deve uscire e'
+        # la battuta gia' sentita tre volte.
         if looks_recycled(reply, said_before):
             raise RepeatedReply("il modello continua a ripetersi")
     base_chars = 420 if intent in {"help", "question", "minigame"} else 300
