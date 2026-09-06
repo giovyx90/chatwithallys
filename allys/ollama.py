@@ -10,6 +10,20 @@ import httpx
 from allys.config import Settings
 
 
+class BrainUnavailable(RuntimeError):
+    """Nessun backend ha prodotto una risposta.
+
+    Chi chiama decide cosa farne: quasi sempre la risposta giusta e' tacere.
+    Un tempo qui tornava una frase di scuse, che finiva in chat e nella
+    cronologia come se Allys l'avesse detta davvero: bastava un modello lento
+    per riempire il gruppo di scuse.
+    """
+
+
+class BrainBusy(BrainUnavailable):
+    """C'e' gia' troppa gente in coda davanti al modello."""
+
+
 @dataclass(frozen=True)
 class Backend:
     """One place Allys can think. `predict_scale` lets the fast brain talk longer."""
@@ -18,6 +32,7 @@ class Backend:
     base_url: str
     chat_model: str
     predict_scale: float = 1.0
+    timeout: float = 120.0
 
     def scaled(self, num_predict: int) -> int:
         return max(24, int(round(num_predict * self.predict_scale)))
@@ -34,6 +49,7 @@ class OllamaClient:
             name="vps",
             base_url=settings.ollama_base_url.rstrip("/"),
             chat_model=settings.ollama_chat_model,
+            timeout=float(settings.ollama_timeout_seconds),
         )
         gpu_url = (settings.ollama_gpu_base_url or "").strip().rstrip("/")
         self.gpu: Backend | None = None
@@ -43,14 +59,47 @@ class OllamaClient:
                 base_url=gpu_url,
                 chat_model=settings.ollama_gpu_chat_model or settings.ollama_chat_model,
                 predict_scale=settings.ollama_gpu_predict_scale,
+                timeout=float(settings.ollama_gpu_timeout_seconds),
             )
         self.embed_model = settings.ollama_embed_model
+        self.keep_alive = str(settings.ollama_keep_alive)
         self._probe_seconds = max(5, settings.ollama_gpu_probe_seconds)
         self._probe_timeout = 2.0
         self._gpu_up = False
         self._gpu_checked_at = 0.0
-        self._probe_lock = asyncio.Lock()
         self.last_backend = self.home.name
+
+        # Il modello risponde a una richiesta alla volta: su CPU le altre
+        # aspettano comunque dentro Ollama, ma li' nessuno le conta e scadono
+        # tutte insieme. Le teniamo in fila qui, e oltre la coda diciamo subito
+        # di no invece di accumulare risposte che arriveranno fuori tempo.
+        self._max_waiting = max(0, int(settings.ollama_max_queue))
+        self._waiting = 0
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._gate: asyncio.Semaphore | None = None
+        self._probe_lock_obj: asyncio.Lock | None = None
+
+    # -- concorrenza -------------------------------------------------------
+
+    def _bind_loop(self) -> None:
+        """Lega lucchetti e semaforo al loop corrente.
+
+        I test girano piu' ``asyncio.run`` sullo stesso client, e una primitiva
+        asyncio creata in un loop non si puo' usare in un altro.
+        """
+        loop = asyncio.get_running_loop()
+        if self._loop is loop:
+            return
+        self._loop = loop
+        self._gate = asyncio.Semaphore(1)
+        self._probe_lock_obj = asyncio.Lock()
+        self._waiting = 0
+
+    @property
+    def _probe_lock(self) -> asyncio.Lock:
+        self._bind_loop()
+        assert self._probe_lock_obj is not None
+        return self._probe_lock_obj
 
     # -- backend selection -------------------------------------------------
 
@@ -95,22 +144,49 @@ class OllamaClient:
 
     # -- inference ---------------------------------------------------------
 
-    async def chat(self, messages: list[dict[str, str]], num_predict: int = 56, temperature: float = 0.75) -> str:
+    async def chat(
+        self,
+        messages: list[dict[str, str]],
+        num_predict: int = 56,
+        temperature: float = 0.75,
+        timeout: float | None = None,
+    ) -> str:
+        """Una risposta vera, oppure ``BrainUnavailable``. Mai una scusa.
+
+        ``timeout`` serve ai testi lunghi (podcast, recap): li aspetta chi li ha
+        chiesti, quindi possono prendersi piu' del minuto concesso a una battuta.
+        """
+        self._bind_loop()
+        assert self._gate is not None
+        if self._waiting > self._max_waiting:
+            raise BrainBusy("troppe richieste in coda davanti al modello")
+        self._waiting += 1
+        try:
+            async with self._gate:
+                return await self._chat_anywhere(messages, num_predict, temperature, timeout)
+        finally:
+            self._waiting -= 1
+
+    async def _chat_anywhere(
+        self,
+        messages: list[dict[str, str]],
+        num_predict: int,
+        temperature: float,
+        timeout: float | None = None,
+    ) -> str:
         last_error: Exception | None = None
         for backend in await self.backends():
             try:
-                content = await self._chat_on(backend, messages, num_predict, temperature)
+                content = await self._chat_on(backend, messages, num_predict, temperature, timeout)
             except Exception as error:  # the GPU box can vanish mid-sentence
                 last_error = error
                 if backend.name == "gpu":
                     self._mark_gpu(False)
                     continue
-                raise
+                raise BrainUnavailable(str(error) or backend.name) from error
             self.last_backend = backend.name
             return content
-        if last_error is not None:
-            raise last_error
-        return "Il cervello locale sta facendo una pausa, riprovo tra un attimo."
+        raise BrainUnavailable(str(last_error) if last_error else "nessun backend disponibile")
 
     async def _chat_on(
         self,
@@ -118,8 +194,9 @@ class OllamaClient:
         messages: list[dict[str, str]],
         num_predict: int,
         temperature: float,
+        timeout: float | None = None,
     ) -> str:
-        async with httpx.AsyncClient(timeout=180) as client:
+        async with httpx.AsyncClient(timeout=timeout or backend.timeout) as client:
             response = await client.post(
                 f"{backend.base_url}/api/chat",
                 json={
@@ -127,6 +204,7 @@ class OllamaClient:
                     "messages": messages,
                     "stream": False,
                     "think": False,
+                    "keep_alive": self.keep_alive,
                     "options": {
                         "num_predict": backend.scaled(num_predict),
                         "temperature": temperature,
@@ -139,7 +217,9 @@ class OllamaClient:
         content = (message.get("content") or "").strip()
         if not content:
             content = (message.get("thinking") or "").strip()
-        return content or "Il cervello locale sta facendo una pausa, riprovo tra un attimo."
+        if not content:
+            raise BrainUnavailable(f"{backend.name} ha risposto senza testo")
+        return content
 
     async def embed(self, text: str) -> list[float]:
         async with httpx.AsyncClient(timeout=120) as client:

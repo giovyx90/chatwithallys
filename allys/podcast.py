@@ -69,6 +69,7 @@ class PodcastService:
             ],
             num_predict=520,
             temperature=0.8,
+            timeout=900,
         )
         script = clean_spoken_script(script)
         if progress:

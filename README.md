@@ -178,9 +178,26 @@ nulla, solo la velocita'.
 | `OLLAMA_GPU_CHAT_MODEL` | Modello da usare sulla GPU (di solito piu' grosso). |
 | `OLLAMA_GPU_PROBE_SECONDS` | Ogni quanto ricontrolla se il PC e' acceso (30s). |
 | `OLLAMA_GPU_PREDICT_SCALE` | Quanto puo' allungarsi la risposta sulla GPU (1.6x). |
+| `OLLAMA_TIMEOUT_SECONDS` | Quanto aspetta la VPS prima di rinunciare (120s). |
+| `OLLAMA_GPU_TIMEOUT_SECONDS` | Quanto aspetta la GPU (60s: se ci mette tanto, non c'e' piu'). |
+| `OLLAMA_MAX_QUEUE` | Quante richieste possono aspettare in fila (2). |
+| `OLLAMA_KEEP_ALIVE` | Quanto il modello resta caricato tra una domanda e l'altra (30m). |
 
 Gli embedding restano **sempre** sulla VPS: cambiare backend a meta' strada
 significherebbe due spazi vettoriali diversi dentro la stessa collezione Qdrant.
+
+### Quando il modello non risponde
+
+Su CPU una risposta costa una trentina di secondi, quasi tutti spesi a leggere
+il prompt. Le richieste vengono servite **una alla volta**: mandarle insieme non
+le accorcia, le fa solo scadere tutte. Chi arriva quando la fila e' piena
+(`OLLAMA_MAX_QUEUE`) viene rifiutato subito.
+
+Se il cervello non risponde Allys **tace**. Lo dice solo a chi l'ha chiamata per
+nome o le ha risposto, e non piu' di una volta ogni quarto d'ora per chat: prima
+ogni messaggio fallito si prendeva la sua frase di scuse, che finiva anche nella
+cronologia del gruppo come se l'avesse detta apposta. Mentre pensa tiene su il
+"sta scrivendo", cosi' l'attesa si vede.
 
 `/allys_status` dice quale cervello sta rispondendo in quel momento.
 
