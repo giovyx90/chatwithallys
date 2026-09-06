@@ -64,7 +64,8 @@ class FakeDB:
         return {"samples": 30, "average": -0.9, "total": 40}
 
     def recent_messages(self, chat_id, limit=60):
-        return [{"username": "mario", "text": "ma quindi stasera?", "sentiment": 0.4}]
+        return list(getattr(self, "history", None) or
+                    [{"username": "mario", "text": "ma quindi stasera?", "sentiment": 0.4}])
 
     def chat_activity(self, chat_id, window_hours=6):
         return {"new_messages": 40, "unique_speakers": 5, "energy": 2.0, "pending_question": True,
@@ -92,14 +93,19 @@ class FakeOllama:
         self.broken = False
         self.calls = 0
         self.gate: asyncio.Event | None = None
+        self.scripted: list[str] = []
+        self.last_user = ""
 
     async def chat(self, messages, num_predict=56, temperature=0.75, timeout=None):
         self.calls += 1
         self.last_system = messages[0]["content"]
+        self.last_user = messages[1]["content"]
         if self.gate is not None:
             await self.gate.wait()
         if self.broken:
             raise BrainUnavailable("il modello non risponde")
+        if self.scripted:
+            return self.scripted.pop(0)
         return "Comunque quella pizzeria fa schifo, cambiamo."
 
 
@@ -318,3 +324,57 @@ async def test_niente_intervento_spontaneo_se_il_cervello_tace(wired) -> None:
     wired.ollama.broken = True
     assert await bot_module.maybe_speak_spontaneously(wired.bot, -100) is False
     assert wired.bot.sent == []
+
+
+# --- non ripetersi -----------------------------------------------------------
+
+
+def _chat_che_si_ripete():
+    """La storia vera del gruppo: Allys aveva risposto tre volte con la stessa formula."""
+    return [
+        {"username": "spartaco", "text": "allys a che gioco vuoi giocare?", "sentiment": 0.0},
+        {"username": bot_module.BOT_AUTHOR,
+         "text": "Vuoi che ti dica a che gioco vuoi giocare? Bene, ma non e' diventato dittatore di Atlantis, no?",
+         "sentiment": 0.0},
+        {"username": "doc", "text": "allys secondo te Mbappe dittatore che ne pensi", "sentiment": 0.0},
+    ]
+
+
+async def test_le_sue_ultime_frasi_finiscono_nel_prompt_come_divieto(wired) -> None:
+    wired.db.history = _chat_che_si_ripete()
+
+    await bot_module.build_reply(FakeMessage("allys secondo te Mbappe dittatore?"), wired.db.group_settings(-100))
+
+    assert "Non ripeterle" in wired.ollama.last_user
+    assert "dittatore di Atlantis" in wired.ollama.last_user
+
+
+async def test_se_ricicla_la_battuta_ci_riprova(wired) -> None:
+    wired.db.history = _chat_che_si_ripete()
+    wired.ollama.scripted = [
+        "Vuoi che ti dica che ne penso? Bene, ma non e' diventato dittatore di Liberty Bay, no?",
+        "Mbappe dittatore lo reggo solo se il regime prevede rigori a favore.",
+    ]
+
+    reply, _meta = await bot_module.build_reply(
+        FakeMessage("allys secondo te Mbappe dittatore?"), wired.db.group_settings(-100)
+    )
+
+    assert wired.ollama.calls == 2
+    assert "rigori" in reply
+
+
+async def test_se_continua_a_ripetersi_tace(wired) -> None:
+    wired.db.history = _chat_che_si_ripete()
+    wired.ollama.scripted = [
+        "Vuoi che ti dica che ne penso? Bene, ma non e' diventato dittatore di Liberty Bay, no?",
+        "Vuoi che ti dica se ho fatto cadere una nazione? Bene, ma non e' diventato dittatore di Liberty Bay, no?",
+    ]
+    message = FakeMessage("allys secondo te Mbappe dittatore?")
+
+    sent = await bot_module.reply_and_send(
+        message, wired.bot, wired.db.group_settings(-100), announce_failure=True
+    )
+
+    assert sent is False
+    assert message.sent == []  # niente pappagallo e niente scuse: silenzio
